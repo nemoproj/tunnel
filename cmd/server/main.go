@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 
 	"github.com/hashicorp/yamux"
@@ -19,6 +20,24 @@ func main() {
 	port := flag.Int("port", 25565, "Public port to listen on for players")
 	controlPort := flag.Int("control", 8080, "Control port for the Host to connect to")
 	flag.Parse()
+
+	// Print Server Info
+	publicIP := "Unknown"
+	resp, err := http.Get("https://api.ipify.org?format=text")
+	if err == nil {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		publicIP = string(body)
+	}
+
+	fmt.Println("┌───────────────────────────────────────────────────┐")
+	fmt.Println("│           Minecraft Tunnel Relay Server           │")
+	fmt.Println("├───────────────────────────────────────────────────┤")
+	fmt.Printf("│  Public IP:    %-34s │\n", publicIP)
+	fmt.Printf("│  Control Port: %-34d │\n", *controlPort)
+	fmt.Printf("│  Game Port:    %-34d │\n", *port)
+	fmt.Println("└───────────────────────────────────────────────────┘")
+	fmt.Println()
 
 	// 1. Start the Control Server (Where the Host connects)
 	go startControlServer(*controlPort)

@@ -335,7 +335,7 @@ func runHost(serverAddr, localAddr string, p *tea.Program) {
 		return
 	}
 	p.Send(statusMsg("Connected to Relay"))
-	p.Send(logMsg(fmt.Sprintf("Connected to %s", serverAddr)))
+	p.Send(logMsg(fmt.Sprintf("Connected to %s (%s)", serverAddr, conn.RemoteAddr().String())))
 
 	// 2. Setup Yamux Client
 	session, err := yamux.Client(conn, nil)
