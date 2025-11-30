@@ -69,7 +69,9 @@ func startControlServer(port int) {
 		log.Printf("[Control] New connection from %s", conn.RemoteAddr())
 
 		// Setup Yamux Server on this connection
-		session, err := yamux.Server(conn, nil)
+		config := yamux.DefaultConfig()
+		config.KeepAliveInterval = 10 * time.Second
+		session, err := yamux.Server(conn, config)
 		if err != nil {
 			log.Printf("[Control] Failed to create yamux session: %v", err)
 			conn.Close()
@@ -102,6 +104,7 @@ func startGameServer(port int) {
 			log.Printf("[Game] Accept error: %v", err)
 			continue
 		}
+		log.Printf("[Game] Accepted connection from %s", playerConn.RemoteAddr())
 
 		go handlePlayer(playerConn)
 	}
@@ -120,6 +123,7 @@ func handlePlayer(playerConn net.Conn) {
 	}
 
 	// Open a new stream (virtual connection) to the Host
+	log.Printf("[Game] Opening stream for %s...", playerConn.RemoteAddr())
 	stream, err := session.Open()
 	if err != nil {
 		log.Printf("[Game] Failed to open stream to Host: %v", err)
@@ -127,7 +131,7 @@ func handlePlayer(playerConn net.Conn) {
 	}
 	defer stream.Close()
 
-	log.Printf("[Game] Player %s connected. Bridging to Host...", playerConn.RemoteAddr())
+	log.Printf("[Game] Stream opened. Bridging Player %s to Host...", playerConn.RemoteAddr())
 
 	// Send Player IP to Host so it can log it
 	// We use a simple text protocol: "IP:PORT\n"

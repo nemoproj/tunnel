@@ -338,7 +338,22 @@ func runHost(serverAddr, localAddr string, p *tea.Program) {
 	p.Send(logMsg(fmt.Sprintf("Connected to %s (%s)", serverAddr, conn.RemoteAddr().String())))
 
 	// 2. Setup Yamux Client
-	session, err := yamux.Client(conn, nil)
+	// Capture yamux logs to the UI
+	r, w := io.Pipe()
+	defer w.Close()
+
+	go func() {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			p.Send(logMsg("Yamux: " + scanner.Text()))
+		}
+	}()
+
+	config := yamux.DefaultConfig()
+	config.KeepAliveInterval = 10 * time.Second
+	config.LogOutput = w
+
+	session, err := yamux.Client(conn, config)
 	if err != nil {
 		p.Send(errorMsg(err))
 		conn.Close()
@@ -362,8 +377,11 @@ func handleStream(stream net.Conn, localAddr string, p *tea.Program) {
 
 	// 4. Read Player IP Header
 	// The Relay sends "IP:PORT\n" as the first bytes
+	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	bufReader := bufio.NewReader(stream)
 	playerIP, err := bufReader.ReadString('\n')
+	stream.SetReadDeadline(time.Time{}) // Reset deadline
+
 	if err != nil {
 		p.Send(errorMsg(fmt.Errorf("failed to read player IP: %v", err)))
 		return
