@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/yamux"
 )
@@ -21,9 +22,14 @@ func main() {
 	controlPort := flag.Int("control", 8080, "Control port for the Host to connect to")
 	flag.Parse()
 
+	fmt.Println("Initializing...")
+
 	// Print Server Info
 	publicIP := "Unknown"
-	resp, err := http.Get("https://api.ipify.org?format=text")
+	client := http.Client{
+		Timeout: 2 * time.Second,
+	}
+	resp, err := client.Get("https://api.ipify.org?format=text")
 	if err == nil {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
@@ -31,7 +37,7 @@ func main() {
 	}
 
 	fmt.Println("┌───────────────────────────────────────────────────┐")
-	fmt.Println("│           Minecraft Tunnel Relay Server           │")
+	fmt.Println("│             TNS tunnel relay server               │")
 	fmt.Println("├───────────────────────────────────────────────────┤")
 	fmt.Printf("│  Public IP:    %-34s │\n", publicIP)
 	fmt.Printf("│  Control Port: %-34d │\n", *controlPort)

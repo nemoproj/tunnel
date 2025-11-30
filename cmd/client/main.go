@@ -111,8 +111,8 @@ func initialModel(configChan chan configReadyMsg) model {
 
 		switch i {
 		case 0:
-			t.Placeholder = "Relay Server (e.g. OCI instance 152.67.204.131:8080)"
-			t.SetValue("152.67.204.131:8080")
+			t.Placeholder = "Relay Server (e.g. OCI instance 134.185.100.194:8080)"
+			t.SetValue("134.185.100.194:8080")
 			t.Focus()
 			t.PromptStyle = focusedStyle
 			t.TextStyle = focusedStyle
