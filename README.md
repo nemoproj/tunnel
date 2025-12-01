@@ -1,65 +1,63 @@
 # tunnel
+> bespoke reverse tunnel relay for TNS SMP
 
-## Problem Statement
-(Based on provided chat log)
-- **Target User:** Friend running a Minecraft server.
-- **Network Constraints:** 
-  - Behind Double NAT.
-  - No Public IPv4 address.
-  - Has IPv6, but not all players have IPv6 connectivity.
-- **Requirements:**
-  - Players must be able to connect via IPv4 without installing VPN software (e.g., Hamachi, ZeroTier).
-  - No reliance on third-party tunneling services (ngrok, playit.gg, etc.).
-  - No paid game hosting services.
-  - **Self-hosted** solution.
+TNS SMP를 위한 리버스 터널링 도구입니다. 오라클 클라우드 E2 Micro instance를 중계 서버(Relay)로 사용하여, 공인 (Public) IPv4가 없는 로컬 환경의 마인크래프트 서버를 외부로 노출합니다.
 
-## Proposed Solution: Multiplexed Reverse Tunnel
-To bypass the Double NAT, we will build a "Reverse Tunnel" architecture using a single persistent TCP connection with stream multiplexing.
+## 설계
 
-### Architecture
+포트 포워딩 대신 서버 호스트가 중계 서버로 먼저 연결을 맺는 방식을 사용합니다.
 
 ```mermaid
 graph LR
-    Player["플레이어 (IPv4)"] -- "TCP:25565" --> Relay["Relay (Public IPv4)"]
-    Relay -- "TCP:8080 (Yamux Tunnel)" --> Host["PC (다원)"]
-    Host -- "TCP:25565" --> MC["TNS 서버"]
+    Player["플레이어 (Client)"] -- "TCP:25565" --> Relay["오라클 클라우드 (Relay)"]
+    Relay -- "Yamux Tunnel (TCP:8080)" --> Host["로컬 서버 (Host)"]
+    Host -- "TCP:25565" --> MC["마인크래프트 (Target)"]
 ```
 
-1.  **Relay**
-    - **Hosted by:** You (VPS/Public IP).
-    - **Ports:**
-      - `8080`: Tunnel listener (Host connects here).
-      - `25565`: Game listener (Players connect here).
-    - **Logic:**
-      - Waits for Host to connect on `8080`.
-      - Establishes a **Yamux** session (multiplexer) over this connection.
-      - When a Player connects to `25565`:
-        - Opens a new logical **Stream** inside the Yamux session to the Host.
-        - Copies data between the Player socket and the Yamux stream.
+### 네트워크 흐름
 
-2.  **Host**
-    - **Hosted by:** Friend.
-    - **Logic:**
-      - Connects outbound to Relay on `8080`.
-      - Starts a Yamux session.
-      - Listens for incoming streams from the Relay (virtual incoming connections).
-      - When a stream arrives:
-        - Dials `localhost:25565` (Minecraft Server).
-        - Copies data between the Yamux stream and the Minecraft socket.
+1.  **Relay:** 오라클 VPS에서 실행됩니다.
+    *   `8080`: 호스트(Host)와의 제어 채널 연결용
+    *   `25565`: 플레이어들의 게임 접속용
+2.  **Host (TNS):** 마인크래프트 서버가 돌아가는 로컬 머신에서 실행됩니다.
+    *   시작 시 Relay의 `8080` 포트로 outbound TCP 연결을 맺습니다.
 
-### Why this approach?
-- **No Port Forwarding for Host:** The Host does **NOT** need to open any ports. The connection is *outbound* (like loading a webpage), which works fine behind Double NAT.
-- **IPv6 Support:** The Host can connect to the Relay over IPv6 (if the Relay supports it), while the Relay listens for Players on IPv4. This bridges the IPv6-only host to IPv4 players.
-- **Robustness:** Yamux handles keepalives and connection health.
-- **Simplicity:** No need to manage separate "control" and "data" connections. Every player is just a stream inside the main tunnel.
+3.  **Multiplexing w/ Yamux:**
+    *   Relay와 Host 간의 TCP 연결 위에 `hashicorp/yamux`를 사용하여 멀티플렉싱 세션을 생성합니다.
+    *   플레이어가 Relay의 `25565` 포트로 접속하면, Relay는 기존에 맺어진 세션 내부에 가상의 ㄴtream을 생성하여 Host로 데이터를 전달합니다.
+    *   Host는 이 스트림을 수락해 로컬의 `localhost:25565`로 트래픽을 프록시합니다.
 
-### Technology Stack
-- **Language:** Go (Golang).
-- **Library:** `github.com/hashicorp/yamux` for multiplexing.
+## 오라클 클라우드 설정 (Oracle Cloud Setup)
+
+이 프로젝트는 오라클 클라우드 환경을 기준으로 구성되었습니다.
 
 
-## Todo
-- [ ] Design Protocol (Control channel vs Data channels)
-- [ ] Implement Relay
-- [ ] Implement Host
-- [ ] Add authentication (simple token) to prevent unauthorized usage.
+* VCN Security List:
+
+Ingress Rules에 `8080` (Tunnel Control) 및 `25565` (Minecraft) 포트 허용 추가해야 합니다.
+
+* OS 방화벽
+    *   인스턴스 내부 방화벽에서도 해당 포트를 열어줘야 합니다.
+    ```bash
+    # Oracle Linux 예시
+    sudo firewall-cmd --permanent --add-port=8080/tcp
+    sudo firewall-cmd --permanent --add-port=25565/tcp
+    sudo firewall-cmd --reload
+    ```
+
+## deployment
+
+Go 1.21 이상이 필요합니다.
+
+### 빌드
+
+```bash
+make
+# bin/tunnel-server 와 bin/tunnel-client 가 생성됩니다.
+```
+
+
+
+used
+- `hashicorp/yamux`
+- `charmbracelet/bubbletea`
