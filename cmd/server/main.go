@@ -1,19 +1,21 @@
 package main
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
+	"log"
 	"net"
-	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
-	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
+	"tunnel/internal/daemon"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/hashicorp/yamux"
 )
 
 // Styles
@@ -64,12 +66,8 @@ var (
 )
 
 // Messages
-type statusMsg string
-type logMsg string
-type errorMsg error
-type ipMsg string
+type statusUpdateMsg daemon.ServerStatus
 type tickMsg time.Time
-type playerConnMsg bool // true = connected, false = disconnected
 
 type configReadyMsg struct {
 	controlPort int
@@ -105,9 +103,13 @@ type model struct {
 
 	// Channel to signal the network loop
 	configChan chan configReadyMsg
+	
+	// Socket path for daemon mode
+	socketPath string
+	socketConn net.Conn
 }
 
-func initialModel(configChan chan configReadyMsg) model {
+func initialModel(configChan chan configReadyMsg, socketPath string) model {
 	m := model{
 		state:      stateConfig,
 		inputs:     make([]textinput.Model, 2),
@@ -115,6 +117,7 @@ func initialModel(configChan chan configReadyMsg) model {
 		publicIP:   "Fetching...",
 		logs:       []string{},
 		configChan: configChan,
+		socketPath: socketPath,
 	}
 
 	var t textinput.Model
@@ -161,6 +164,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			m.quitting = true
+			if m.socketConn != nil {
+				m.socketConn.Close()
+			}
 			return m, tea.Quit
 		}
 
@@ -198,7 +204,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}()
 
-					return m, nil
+					return m, tickCmd()
 				}
 
 				// Cycle indexes
@@ -234,32 +240,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.state == stateRunning {
 			if msg.String() == "q" {
 				m.quitting = true
+				if m.socketConn != nil {
+					m.socketConn.Close()
+				}
 				return m, tea.Quit
 			}
 		}
 
 	// Handle Runtime Messages
-	case statusMsg:
-		m.status = string(msg)
-	case logMsg:
-		m.logs = append(m.logs, string(msg))
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
+	case statusUpdateMsg:
+		m.status = msg.Status
+		m.publicIP = msg.PublicIP
+		m.controlPort = msg.ControlPort
+		m.gamePort = msg.GamePort
+		m.activePlayers = msg.ActivePlayers
+		m.bytesTransferred = msg.BytesTransferred
+		m.logs = msg.Logs
+		if !msg.StartTime.IsZero() {
+			m.startTime = msg.StartTime
 		}
-	case errorMsg:
-		m.logs = append(m.logs, fmt.Sprintf("Error: %v", msg))
-	case ipMsg:
-		m.publicIP = string(msg)
 	case tickMsg:
-		// Update traffic from global counter
-		m.bytesTransferred = atomic.LoadInt64(&globalBytes)
 		return m, tickCmd()
-	case playerConnMsg:
-		if bool(msg) {
-			m.activePlayers++
-		} else {
-			m.activePlayers--
-		}
 	}
 
 	// Handle Input updates
@@ -356,40 +357,71 @@ func (m model) View() string {
 	return appStyle.Render(s)
 }
 
-// Global variable to hold the active tunnel session
-var (
-	tunnelSession *yamux.Session
-	tunnelMutex   sync.Mutex
-	globalBytes   int64
-)
-
 func main() {
+	var (
+		daemonMode  = flag.Bool("daemon", false, "Run in daemon mode (background)")
+		controlPort = flag.Int("control-port", 8080, "Port for host control connections")
+		gamePort    = flag.Int("game-port", 25565, "Port for player game connections")
+		socketPath  = flag.String("socket", daemon.DefaultSocketPath, "Unix socket path for IPC")
+	)
+	flag.Parse()
+
+	if *daemonMode {
+		runDaemon(*controlPort, *gamePort, *socketPath)
+	} else {
+		runTUI(*socketPath)
+	}
+}
+
+func runDaemon(controlPort, gamePort int, socketPath string) {
+	log.Printf("Starting tunnel server in daemon mode...")
+	log.Printf("Control Port: %d, Game Port: %d", controlPort, gamePort)
+	log.Printf("Socket Path: %s", socketPath)
+
+	srv := daemon.NewServer(controlPort, gamePort, socketPath)
+	if err := srv.Start(); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
+
+	log.Printf("Server started successfully")
+
+	// Wait for interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	<-sigChan
+
+	log.Printf("Shutting down...")
+	srv.Stop()
+	srv.Wait()
+}
+
+func runTUI(socketPath string) {
+	// Check if daemon is already running
+	conn, err := net.Dial("unix", socketPath)
+	if err == nil {
+		// Daemon is running, connect to it directly
+		fmt.Println("Connecting to running daemon...")
+		p := tea.NewProgram(initialModelRunning())
+		
+		go runTUIClient(conn, p)
+		
+		if _, err := p.Run(); err != nil {
+			fmt.Printf("Error: %v\n", err)
+		}
+		return
+	}
+
+	// No daemon running, start with config
 	configChan := make(chan configReadyMsg)
-	p := tea.NewProgram(initialModel(configChan))
+	p := tea.NewProgram(initialModel(configChan, socketPath))
 
 	// Run network loop in a goroutine
 	go func() {
 		// Wait for config
 		config := <-configChan
 
-		// Fetch IP
-		go func() {
-			client := http.Client{Timeout: 2 * time.Second}
-			resp, err := client.Get("https://api.ipify.org?format=text")
-			if err == nil {
-				defer resp.Body.Close()
-				body, _ := io.ReadAll(resp.Body)
-				p.Send(ipMsg(string(body)))
-			} else {
-				p.Send(ipMsg("Unknown"))
-			}
-		}()
-
-		p.Send(statusMsg("Starting listeners..."))
-
-		// Start Servers
-		go startControlServer(config.controlPort, p)
-		go startGameServer(config.gamePort, p)
+		// Start embedded server
+		runEmbeddedServer(config.controlPort, config.gamePort, socketPath, p)
 	}()
 
 	if _, err := p.Run(); err != nil {
@@ -397,123 +429,62 @@ func main() {
 	}
 }
 
-func startControlServer(port int, p *tea.Program) {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		p.Send(errorMsg(fmt.Errorf("control listener failed: %v", err)))
-		return
+func initialModelRunning() model {
+	m := model{
+		state:      stateRunning,
+		status:     "Connecting...",
+		publicIP:   "Unknown",
+		logs:       []string{},
+		startTime:  time.Now(),
 	}
-	p.Send(logMsg(fmt.Sprintf("[Control] Listening on :%d", port)))
-	p.Send(statusMsg("Waiting for Host..."))
+	return m
+}
 
+func runTUIClient(conn net.Conn, p *tea.Program) {
+	defer conn.Close()
+
+	decoder := json.NewDecoder(conn)
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			p.Send(errorMsg(fmt.Errorf("control accept error: %v", err)))
-			continue
+		var msg daemon.Message
+		if err := decoder.Decode(&msg); err != nil {
+			return
 		}
 
-		p.Send(logMsg(fmt.Sprintf("[Control] Connection from %s", conn.RemoteAddr())))
-
-		// Setup Yamux Server
-		config := yamux.DefaultConfig()
-		config.KeepAliveInterval = 10 * time.Second
-
-		session, err := yamux.Server(conn, config)
-		if err != nil {
-			p.Send(errorMsg(fmt.Errorf("yamux session failed: %v", err)))
-			conn.Close()
-			continue
+		if msg.Type == "status" {
+			var status daemon.ServerStatus
+			if err := json.Unmarshal(msg.Data, &status); err == nil {
+				p.Send(statusUpdateMsg(status))
+			}
 		}
-
-		tunnelMutex.Lock()
-		if tunnelSession != nil {
-			p.Send(logMsg("[Control] Overwriting existing session"))
-			tunnelSession.Close()
-		}
-		tunnelSession = session
-		tunnelMutex.Unlock()
-
-		p.Send(statusMsg("Host Connected"))
-		p.Send(logMsg("[Control] Tunnel established"))
 	}
 }
 
-func startGameServer(port int, p *tea.Program) {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func runEmbeddedServer(controlPort, gamePort int, socketPath string, p *tea.Program) {
+	srv := daemon.NewServer(controlPort, gamePort, socketPath)
+	if err := srv.Start(); err != nil {
+		log.Printf("Failed to start embedded server: %v", err)
+		return
+	}
+
+	// Wait for socket to be ready with exponential backoff
+	const (
+		initialBackoffMs = 50
+		maxRetries       = 10
+	)
+	var conn net.Conn
+	var err error
+	for i := 0; i < maxRetries; i++ {
+		conn, err = net.Dial("unix", socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Duration(initialBackoffMs*(1<<uint(i))) * time.Millisecond) // 50ms, 100ms, 200ms, ...
+	}
+	
 	if err != nil {
-		p.Send(errorMsg(fmt.Errorf("game listener failed: %v", err)))
-		return
-	}
-	p.Send(logMsg(fmt.Sprintf("[Game] Listening on :%d", port)))
-
-	for {
-		playerConn, err := listener.Accept()
-		if err != nil {
-			p.Send(errorMsg(fmt.Errorf("game accept error: %v", err)))
-			continue
-		}
-
-		go handlePlayer(playerConn, p)
-	}
-}
-
-// CountingReader wraps an io.Reader and counts bytes read
-type CountingReader struct {
-	r io.Reader
-}
-
-func (c *CountingReader) Read(p []byte) (n int, err error) {
-	n, err = c.r.Read(p)
-	if n > 0 {
-		atomic.AddInt64(&globalBytes, int64(n))
-	}
-	return
-}
-
-func handlePlayer(playerConn net.Conn, p *tea.Program) {
-	defer playerConn.Close()
-
-	tunnelMutex.Lock()
-	session := tunnelSession
-	tunnelMutex.Unlock()
-
-	if session == nil {
+		log.Printf("Failed to connect to embedded server after %d retries: %v", maxRetries, err)
 		return
 	}
 
-	p.Send(logMsg(fmt.Sprintf("[Game] Player connected: %s", playerConn.RemoteAddr())))
-	p.Send(playerConnMsg(true))
-	defer p.Send(playerConnMsg(false))
-
-	stream, err := session.Open()
-	if err != nil {
-		p.Send(errorMsg(fmt.Errorf("failed to open stream: %v", err)))
-		return
-	}
-	defer stream.Close()
-
-	// Send Player IP Header
-	if _, err := stream.Write([]byte(playerConn.RemoteAddr().String() + "\n")); err != nil {
-		p.Send(errorMsg(fmt.Errorf("failed to send header: %v", err)))
-		return
-	}
-
-	// Bidirectional copy with traffic counting
-	done := make(chan struct{})
-
-	go func() {
-		// Stream -> Player
-		io.Copy(playerConn, &CountingReader{r: stream})
-		done <- struct{}{}
-	}()
-
-	go func() {
-		// Player -> Stream
-		io.Copy(stream, &CountingReader{r: playerConn})
-		done <- struct{}{}
-	}()
-
-	<-done
-	p.Send(logMsg(fmt.Sprintf("[Game] Player disconnected: %s", playerConn.RemoteAddr())))
+	runTUIClient(conn, p)
 }

@@ -56,7 +56,91 @@ make
 # bin/tunnel-server 와 bin/tunnel-client 가 생성됩니다.
 ```
 
+### 서버 실행 방법
 
+#### 옵션 1: 데몬 모드 (권장 - 백그라운드 실행)
+
+서버를 백그라운드에서 실행하고 TUI는 별도로 연결:
+
+```bash
+# 서버 데몬 시작
+./bin/tunnel-server -daemon -control-port 8080 -game-port 25565
+
+# TUI로 서버 상태 확인 (언제든지 종료/재연결 가능)
+./bin/tunnel-server
+```
+
+TUI를 종료해도 서버는 계속 실행됩니다.
+
+#### 옵션 2: TUI 내장 모드
+
+TUI와 함께 서버 실행 (TUI 종료 시 서버도 종료):
+
+```bash
+# 데몬이 실행 중이지 않을 때 TUI를 실행하면 서버가 내장되어 시작됩니다
+./bin/tunnel-server
+```
+
+#### systemd 서비스 설치 (선택사항)
+
+systemd를 사용하여 서버를 시스템 서비스로 실행:
+
+```bash
+# 바이너리 복사
+sudo cp bin/tunnel-server /usr/local/bin/
+
+# 서비스 사용자 생성
+sudo useradd -r -s /bin/false tunnel
+
+# 서비스 파일 설치
+sudo cp tunnel-server.service /etc/systemd/system/
+
+# 서비스 시작 및 활성화
+sudo systemctl daemon-reload
+sudo systemctl enable tunnel-server
+sudo systemctl start tunnel-server
+
+# 상태 확인
+sudo systemctl status tunnel-server
+
+# TUI로 모니터링
+./bin/tunnel-server
+```
+
+### 클라이언트 실행
+
+```bash
+./bin/tunnel-client
+```
+
+### 서버 데몬 제어
+
+```bash
+# 상태 확인
+./bin/tunnel-server  # TUI로 연결
+
+# 데몬 종료 (systemd 미사용 시)
+pkill tunnel-server
+
+# 데몬 종료 (systemd 사용 시)
+sudo systemctl stop tunnel-server
+```
+
+### 주요 특징
+
+#### 독립적인 서버 실행
+- 서버는 백그라운드에서 독립적으로 실행됩니다
+- TUI를 닫아도 서버는 계속 작동합니다
+- SSH 연결이 끊어져도 서버는 영향받지 않습니다
+
+#### 실시간 모니터링
+- TUI를 통해 언제든지 서버 상태를 확인할 수 있습니다
+- 여러 TUI 인스턴스를 동시에 연결할 수 있습니다
+- 서버 재시작 없이 TUI를 열고 닫을 수 있습니다
+
+#### 시스템 서비스
+- systemd 통합으로 시스템 부팅 시 자동 시작
+- 안정적인 서비스 관리 및 자동 재시작
 
 used
 - `hashicorp/yamux`
