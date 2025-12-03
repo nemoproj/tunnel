@@ -126,6 +126,22 @@ pkill tunnel-server
 sudo systemctl stop tunnel-server
 ```
 
+### 주요 특징
+
+#### 독립적인 서버 실행
+- 서버는 백그라운드에서 독립적으로 실행됩니다
+- TUI를 닫아도 서버는 계속 작동합니다
+- SSH 연결이 끊어져도 서버는 영향받지 않습니다
+
+#### 실시간 모니터링
+- TUI를 통해 언제든지 서버 상태를 확인할 수 있습니다
+- 여러 TUI 인스턴스를 동시에 연결할 수 있습니다
+- 서버 재시작 없이 TUI를 열고 닫을 수 있습니다
+
+#### 시스템 서비스
+- systemd 통합으로 시스템 부팅 시 자동 시작
+- 안정적인 서비스 관리 및 자동 재시작
+
 used
 - `hashicorp/yamux`
 - `charmbracelet/bubbletea`
