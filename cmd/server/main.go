@@ -251,6 +251,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusUpdateMsg:
 		m.status = msg.Status
 		m.publicIP = msg.PublicIP
+		m.controlPort = msg.ControlPort
+		m.gamePort = msg.GamePort
 		m.activePlayers = msg.ActivePlayers
 		m.bytesTransferred = msg.BytesTransferred
 		m.logs = msg.Logs

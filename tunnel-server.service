@@ -1,0 +1,23 @@
+[Unit]
+Description=Tunnel Relay Server
+After=network.target
+
+[Service]
+Type=simple
+User=tunnel
+Group=tunnel
+ExecStart=/usr/local/bin/tunnel-server -daemon -control-port 8080 -game-port 25565
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target
