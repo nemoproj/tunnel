@@ -466,11 +466,20 @@ func runEmbeddedServer(controlPort, gamePort int, socketPath string, p *tea.Prog
 		return
 	}
 
-	// Connect to our own IPC socket to get updates
-	time.Sleep(100 * time.Millisecond) // Give server time to start
-	conn, err := net.Dial("unix", socketPath)
+	// Wait for socket to be ready with exponential backoff
+	var conn net.Conn
+	var err error
+	maxRetries := 10
+	for i := 0; i < maxRetries; i++ {
+		conn, err = net.Dial("unix", socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Duration(50*(1<<uint(i))) * time.Millisecond) // 50ms, 100ms, 200ms, ...
+	}
+	
 	if err != nil {
-		log.Printf("Failed to connect to embedded server: %v", err)
+		log.Printf("Failed to connect to embedded server after %d retries: %v", maxRetries, err)
 		return
 	}
 

@@ -39,6 +39,7 @@ type Server struct {
 	socketPath string
 	listeners  []net.Listener
 	wg         sync.WaitGroup
+	done       chan struct{}
 }
 
 // NewServer creates a new tunnel server
@@ -55,6 +56,7 @@ func NewServer(controlPort, gamePort int, socketPath string) *Server {
 		maxLogs:     100,
 		socketPath:  socketPath,
 		listeners:   make([]net.Listener, 0),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -100,6 +102,7 @@ func (s *Server) Wait() {
 
 // Stop stops the server
 func (s *Server) Stop() {
+	close(s.done)
 	for _, listener := range s.listeners {
 		listener.Close()
 	}
@@ -112,8 +115,12 @@ func (s *Server) fetchPublicIP() {
 	resp, err := client.Get("https://api.ipify.org?format=text")
 	if err == nil {
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		s.publicIP = string(body)
+		body, err := io.ReadAll(resp.Body)
+		if err == nil {
+			s.publicIP = string(body)
+		} else {
+			s.publicIP = "Unknown"
+		}
 	} else {
 		s.publicIP = "Unknown"
 	}
@@ -150,11 +157,13 @@ func (s *Server) startControlServer() error {
 		conn, err := listener.Accept()
 		if err != nil {
 			// Check if listener was closed intentionally
-			if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+			select {
+			case <-s.done:
 				return nil
+			default:
+				s.logError(fmt.Errorf("control accept error: %v", err))
+				continue
 			}
-			s.logError(fmt.Errorf("control accept error: %v", err))
-			continue
 		}
 
 		s.log(fmt.Sprintf("[Control] Connection from %s", conn.RemoteAddr()))
@@ -195,11 +204,13 @@ func (s *Server) startGameServer() error {
 		playerConn, err := listener.Accept()
 		if err != nil {
 			// Check if listener was closed intentionally
-			if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+			select {
+			case <-s.done:
 				return nil
+			default:
+				s.logError(fmt.Errorf("game accept error: %v", err))
+				continue
 			}
-			s.logError(fmt.Errorf("game accept error: %v", err))
-			continue
 		}
 
 		go s.handlePlayer(playerConn)
@@ -239,14 +250,22 @@ func (s *Server) handlePlayer(playerConn net.Conn) {
 
 	go func() {
 		// Stream -> Player
-		n, _ := io.Copy(playerConn, stream)
+		n, err := io.Copy(playerConn, stream)
+		if err != nil && err != io.EOF {
+			// Log only unexpected errors
+			s.log(fmt.Sprintf("[Game] Copy error (stream->player): %v", err))
+		}
 		atomic.AddInt64(&s.bytesTransferred, n)
 		done <- struct{}{}
 	}()
 
 	go func() {
 		// Player -> Stream
-		n, _ := io.Copy(stream, playerConn)
+		n, err := io.Copy(stream, playerConn)
+		if err != nil && err != io.EOF {
+			// Log only unexpected errors
+			s.log(fmt.Sprintf("[Game] Copy error (player->stream): %v", err))
+		}
 		atomic.AddInt64(&s.bytesTransferred, n)
 		done <- struct{}{}
 	}()
@@ -272,16 +291,20 @@ func (s *Server) startIPCServer() error {
 	s.listeners = append(s.listeners, listener)
 
 	// Make socket accessible to user
-	os.Chmod(s.socketPath, 0600)
+	if err := os.Chmod(s.socketPath, 0600); err != nil {
+		s.log(fmt.Sprintf("Warning: Failed to set socket permissions: %v", err))
+	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			// Check if listener was closed intentionally
-			if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+			select {
+			case <-s.done:
 				return nil
+			default:
+				continue
 			}
-			continue
 		}
 
 		go s.handleIPCClient(conn)
