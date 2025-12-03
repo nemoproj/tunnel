@@ -107,7 +107,9 @@ func (s *Server) Stop() {
 		listener.Close()
 	}
 	// Remove socket file
-	os.Remove(s.socketPath)
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		s.log(fmt.Sprintf("Warning: Failed to remove socket file: %v", err))
+	}
 }
 
 func (s *Server) fetchPublicIP() {
@@ -252,7 +254,7 @@ func (s *Server) handlePlayer(playerConn net.Conn) {
 		// Stream -> Player
 		n, err := io.Copy(playerConn, stream)
 		if err != nil && err != io.EOF {
-			// Log only unexpected errors
+			// Log errors other than EOF and connection resets
 			s.log(fmt.Sprintf("[Game] Copy error (stream->player): %v", err))
 		}
 		atomic.AddInt64(&s.bytesTransferred, n)
@@ -263,7 +265,7 @@ func (s *Server) handlePlayer(playerConn net.Conn) {
 		// Player -> Stream
 		n, err := io.Copy(stream, playerConn)
 		if err != nil && err != io.EOF {
-			// Log only unexpected errors
+			// Log errors other than EOF and connection resets
 			s.log(fmt.Sprintf("[Game] Copy error (player->stream): %v", err))
 		}
 		atomic.AddInt64(&s.bytesTransferred, n)

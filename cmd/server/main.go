@@ -467,15 +467,18 @@ func runEmbeddedServer(controlPort, gamePort int, socketPath string, p *tea.Prog
 	}
 
 	// Wait for socket to be ready with exponential backoff
+	const (
+		initialBackoffMs = 50
+		maxRetries       = 10
+	)
 	var conn net.Conn
 	var err error
-	maxRetries := 10
 	for i := 0; i < maxRetries; i++ {
 		conn, err = net.Dial("unix", socketPath)
 		if err == nil {
 			break
 		}
-		time.Sleep(time.Duration(50*(1<<uint(i))) * time.Millisecond) // 50ms, 100ms, 200ms, ...
+		time.Sleep(time.Duration(initialBackoffMs*(1<<uint(i))) * time.Millisecond) // 50ms, 100ms, 200ms, ...
 	}
 	
 	if err != nil {
