@@ -13,9 +13,9 @@ import (
 )
 
 type Config struct {
-	ControlPort  int
-	GamePort     int    // Java Edition TCP port (default 25565)
-	BedrockPort  int    // Bedrock Edition UDP port (default 19132, 0 to disable)
+	ControlPort int
+	GamePort    int // Java Edition TCP port (default 25565)
+	BedrockPort int // Bedrock Edition UDP port (default 19132, 0 to disable)
 }
 
 type Relay struct {
@@ -61,7 +61,7 @@ func (r *Relay) Start() {
 	r.Log("Starting listeners...")
 	go r.startControlServer()
 	go r.startGameServer()
-	
+
 	// Start Bedrock UDP server if port is configured
 	if r.Config.BedrockPort > 0 {
 		go r.startBedrockServer()
