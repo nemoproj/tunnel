@@ -61,9 +61,10 @@ type statusMsg string
 type logMsg string
 type errorMsg error
 type configReadyMsg struct {
-	serverAddr string
-	localAddr  string
-	gamePort   int
+	serverAddr  string
+	localAddr   string
+	bedrockAddr string
+	gamePort    int
 }
 
 // Application State
@@ -81,9 +82,10 @@ type model struct {
 	focusIndex int
 
 	// Config
-	serverAddr string
-	localAddr  string
-	gamePort   int
+	serverAddr  string
+	localAddr   string
+	bedrockAddr string
+	gamePort    int
 
 	// Runtime
 	status   string
@@ -97,7 +99,7 @@ type model struct {
 func initialModel(configChan chan configReadyMsg) model {
 	m := model{
 		state:      stateConfig,
-		inputs:     make([]textinput.Model, 3),
+		inputs:     make([]textinput.Model, 4),
 		status:     "Initializing...",
 		logs:       []string{},
 		configChan: configChan,
@@ -117,11 +119,16 @@ func initialModel(configChan chan configReadyMsg) model {
 			t.PromptStyle = focusedStyle
 			t.TextStyle = focusedStyle
 		case 1:
-			t.Placeholder = "Local Server (e.g. localhost:25565)"
+			t.Placeholder = "Local Java Server (e.g. localhost:25565)"
 			t.SetValue("localhost:25565")
 			t.PromptStyle = blurredStyle
 			t.TextStyle = blurredStyle
 		case 2:
+			t.Placeholder = "Local Bedrock/Geyser (e.g. localhost:19132, blank to disable)"
+			t.SetValue("localhost:19132")
+			t.PromptStyle = blurredStyle
+			t.TextStyle = blurredStyle
+		case 3:
 			t.Placeholder = "Public Game Port (e.g. 25565)"
 			t.SetValue("25565")
 			t.PromptStyle = blurredStyle
@@ -157,7 +164,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Parse inputs
 					m.serverAddr = m.inputs[0].Value()
 					m.localAddr = m.inputs[1].Value()
-					portStr := m.inputs[2].Value()
+					m.bedrockAddr = m.inputs[2].Value()
+					portStr := m.inputs[3].Value()
 					port, err := strconv.Atoi(portStr)
 					if err != nil {
 						port = 25565 // Default fallback
@@ -170,9 +178,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Signal network loop to start
 					go func() {
 						m.configChan <- configReadyMsg{
-							serverAddr: m.serverAddr,
-							localAddr:  m.localAddr,
-							gamePort:   m.gamePort,
+							serverAddr:  m.serverAddr,
+							localAddr:   m.localAddr,
+							bedrockAddr: m.bedrockAddr,
+							gamePort:    m.gamePort,
 						}
 					}()
 
@@ -258,7 +267,8 @@ func (m model) View() string {
 
 		labels := []string{
 			"Relay Server Control Address",
-			"Local Minecraft Server Address",
+			"Local Java Server Address",
+			"Local Bedrock/Geyser Address (blank to disable)",
 			"Public Game Port (for display)",
 		}
 
@@ -316,7 +326,7 @@ func main() {
 		// Start loop
 		for {
 			p.Send(statusMsg("Connecting..."))
-			runHost(config.serverAddr, config.localAddr, p)
+			runHost(config.serverAddr, config.localAddr, config.bedrockAddr, p)
 			p.Send(statusMsg("Disconnected. Retrying in 5s..."))
 			time.Sleep(5 * time.Second)
 		}
@@ -327,7 +337,7 @@ func main() {
 	}
 }
 
-func runHost(serverAddr, localAddr string, p *tea.Program) {
+func runHost(serverAddr, localAddr, bedrockAddr string, p *tea.Program) {
 	// 1. Connect to the Relay Server
 	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
@@ -368,28 +378,54 @@ func runHost(serverAddr, localAddr string, p *tea.Program) {
 			return
 		}
 
-		go handleStream(stream, localAddr, p)
+		go handleStream(stream, localAddr, bedrockAddr, p)
 	}
 }
 
-func handleStream(stream net.Conn, localAddr string, p *tea.Program) {
+func handleStream(stream net.Conn, localAddr, bedrockAddr string, p *tea.Program) {
 	defer stream.Close()
 
 	// 4. Read Player IP Header
-	// The Relay sends "IP:PORT\n" as the first bytes
+	// The Relay sends "protocol:IP:PORT\n" as the first bytes
+	// protocol is "tcp" for Java Edition or "udp" for Bedrock Edition
 	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	bufReader := bufio.NewReader(stream)
-	playerIP, err := bufReader.ReadString('\n')
+	header, err := bufReader.ReadString('\n')
 	stream.SetReadDeadline(time.Time{}) // Reset deadline
 
 	if err != nil {
-		p.Send(errorMsg(fmt.Errorf("failed to read player IP: %v", err)))
+		p.Send(errorMsg(fmt.Errorf("failed to read player header: %v", err)))
 		return
 	}
-	playerIP = strings.TrimSpace(playerIP)
-	p.Send(logMsg(fmt.Sprintf("Player connected: %s", playerIP)))
+	header = strings.TrimSpace(header)
+	
+	// Parse protocol and player IP
+	var protocol, playerIP string
+	if strings.HasPrefix(header, "tcp:") {
+		protocol = "tcp"
+		playerIP = strings.TrimPrefix(header, "tcp:")
+	} else if strings.HasPrefix(header, "udp:") {
+		protocol = "udp"
+		playerIP = strings.TrimPrefix(header, "udp:")
+	} else {
+		// Backwards compatibility: assume TCP if no prefix
+		protocol = "tcp"
+		playerIP = header
+	}
+	
+	p.Send(logMsg(fmt.Sprintf("[%s] Player connected: %s", strings.ToUpper(protocol), playerIP)))
 
-	// 5. Connect to Local Minecraft Server
+	if protocol == "udp" {
+		// Handle UDP/Bedrock traffic
+		if bedrockAddr == "" {
+			p.Send(errorMsg(fmt.Errorf("Bedrock player connected but no local Bedrock address configured")))
+			return
+		}
+		handleUDPStream(stream, bufReader, bedrockAddr, playerIP, p)
+		return
+	}
+
+	// 5. Connect to Local Minecraft Server (TCP)
 	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
 		p.Send(errorMsg(fmt.Errorf("failed to connect to local MC: %v", err)))
@@ -414,5 +450,77 @@ func handleStream(stream net.Conn, localAddr string, p *tea.Program) {
 	}()
 
 	<-done
-	p.Send(logMsg(fmt.Sprintf("Player disconnected: %s", playerIP)))
+	p.Send(logMsg(fmt.Sprintf("[TCP] Player disconnected: %s", playerIP)))
+}
+
+// handleUDPStream handles Bedrock Edition UDP traffic over the yamux stream
+func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr string, playerIP string, p *tea.Program) {
+	// Resolve UDP address
+	udpAddr, err := net.ResolveUDPAddr("udp", bedrockAddr)
+	if err != nil {
+		p.Send(errorMsg(fmt.Errorf("failed to resolve UDP address: %v", err)))
+		return
+	}
+	
+	// Connect to local Bedrock/Geyser server
+	localConn, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		p.Send(errorMsg(fmt.Errorf("failed to connect to local Bedrock server: %v", err)))
+		return
+	}
+	defer localConn.Close()
+	
+	done := make(chan struct{})
+	
+	// Stream -> Local UDP (read length-prefixed packets from stream)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		lenBuf := make([]byte, 2)
+		for {
+			// Read length prefix
+			_, err := io.ReadFull(bufReader, lenBuf)
+			if err != nil {
+				return
+			}
+			
+			pktLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+			if pktLen > 65535 {
+				return
+			}
+			
+			// Read packet data
+			data := make([]byte, pktLen)
+			_, err = io.ReadFull(bufReader, data)
+			if err != nil {
+				return
+			}
+			
+			// Send to local UDP server
+			localConn.Write(data)
+		}
+	}()
+	
+	// Local UDP -> Stream (send length-prefixed packets to stream)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		buffer := make([]byte, 65535)
+		for {
+			localConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := localConn.Read(buffer)
+			if err != nil {
+				return
+			}
+			
+			// Write length prefix
+			lenBuf := make([]byte, 2)
+			lenBuf[0] = byte(n >> 8)
+			lenBuf[1] = byte(n & 0xFF)
+			
+			stream.Write(lenBuf)
+			stream.Write(buffer[:n])
+		}
+	}()
+	
+	<-done
+	p.Send(logMsg(fmt.Sprintf("[UDP] Player disconnected: %s", playerIP)))
 }

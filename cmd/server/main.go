@@ -16,7 +16,8 @@ import (
 func main() {
 	// Flags
 	controlPort := flag.Int("control-port", 8080, "Control port for Host connection")
-	gamePort := flag.Int("game-port", 25565, "Game port for Players")
+	gamePort := flag.Int("game-port", 25565, "Game port for Java Edition players (TCP)")
+	bedrockPort := flag.Int("bedrock-port", 0, "Game port for Bedrock Edition players via Geyser (UDP, 0 to disable)")
 	apiPort := flag.Int("api-port", 6060, "API port for status/logs")
 	isDaemon := flag.Bool("daemon", false, "Run as daemon (internal use)")
 
@@ -30,7 +31,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "start":
-			handleStart(pidFile, logFile, *controlPort, *gamePort, *apiPort)
+			handleStart(pidFile, logFile, *controlPort, *gamePort, *bedrockPort, *apiPort)
 			return
 		case "stop":
 			handleStop(pidFile)
@@ -53,7 +54,7 @@ func main() {
 
 	// If running as daemon (forked process)
 	if *isDaemon {
-		runDaemon(pidFile, *controlPort, *gamePort, *apiPort)
+		runDaemon(pidFile, *controlPort, *gamePort, *bedrockPort, *apiPort)
 		return
 	}
 
@@ -71,16 +72,22 @@ func printHelp() {
 	fmt.Println("  tunnel-server monitor  Open the TUI monitor (attach to running server)")
 	fmt.Println()
 	fmt.Println("Options:")
-	fmt.Println("  --control-port int  Control port for Host connection (default 8080)")
-	fmt.Println("  --game-port int     Game port for Players (default 25565)")
-	fmt.Println("  --api-port int      API port for status/logs (default 6060)")
+	fmt.Println("  --control-port int   Control port for Host connection (default 8080)")
+	fmt.Println("  --game-port int      Game port for Java Edition players (default 25565)")
+	fmt.Println("  --bedrock-port int   Game port for Bedrock Edition via Geyser (default 0, disabled)")
+	fmt.Println("  --api-port int       API port for status/logs (default 6060)")
+	fmt.Println()
+	fmt.Println("Geyser Support:")
+	fmt.Println("  To enable Bedrock Edition support via Geyser, use --bedrock-port=19132")
+	fmt.Println("  This opens a UDP port for Bedrock players to connect through.")
 }
 
-func handleStart(pidFile, logFile string, controlPort, gamePort, apiPort int) {
+func handleStart(pidFile, logFile string, controlPort, gamePort, bedrockPort, apiPort int) {
 	// Build args to pass to daemon
 	args := []string{
 		fmt.Sprintf("--control-port=%d", controlPort),
 		fmt.Sprintf("--game-port=%d", gamePort),
+		fmt.Sprintf("--bedrock-port=%d", bedrockPort),
 		fmt.Sprintf("--api-port=%d", apiPort),
 	}
 
@@ -89,6 +96,9 @@ func handleStart(pidFile, logFile string, controlPort, gamePort, apiPort int) {
 		os.Exit(1)
 	}
 	fmt.Printf("API available at http://localhost:%d\n", apiPort)
+	if bedrockPort > 0 {
+		fmt.Printf("Bedrock/Geyser port: %d (UDP)\n", bedrockPort)
+	}
 	fmt.Println("Use 'tunnel-server monitor' to view status")
 }
 
@@ -117,7 +127,7 @@ func runMonitor(apiPort int) {
 	}
 }
 
-func runDaemon(pidFile string, controlPort, gamePort, apiPort int) {
+func runDaemon(pidFile string, controlPort, gamePort, bedrockPort, apiPort int) {
 	// Write PID file
 	if err := daemon.WritePid(pidFile); err != nil {
 		fmt.Printf("Failed to write PID file: %v\n", err)
@@ -136,13 +146,17 @@ func runDaemon(pidFile string, controlPort, gamePort, apiPort int) {
 	}()
 
 	fmt.Println("Starting Tunnel Relay Server (daemon mode)...")
-	fmt.Printf("Control Port: %d\n", controlPort)
-	fmt.Printf("Game Port:    %d\n", gamePort)
-	fmt.Printf("API Port:     %d\n", apiPort)
+	fmt.Printf("Control Port:  %d\n", controlPort)
+	fmt.Printf("Game Port:     %d (Java/TCP)\n", gamePort)
+	if bedrockPort > 0 {
+		fmt.Printf("Bedrock Port:  %d (Geyser/UDP)\n", bedrockPort)
+	}
+	fmt.Printf("API Port:      %d\n", apiPort)
 
 	cfg := relay.Config{
 		ControlPort: controlPort,
 		GamePort:    gamePort,
+		BedrockPort: bedrockPort,
 	}
 
 	r := relay.New(cfg)

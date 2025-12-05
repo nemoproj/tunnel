@@ -12,6 +12,7 @@ type StatusResponse struct {
 	PublicIP         string `json:"public_ip"`
 	ControlPort      int    `json:"control_port"`
 	GamePort         int    `json:"game_port"`
+	BedrockPort      int    `json:"bedrock_port,omitempty"`
 	ActivePlayers    int64  `json:"active_players"`
 	BytesTransferred int64  `json:"bytes_transferred"`
 	TunnelConnected  bool   `json:"tunnel_connected"`
@@ -43,6 +44,7 @@ func (r *Relay) handleStatus(w http.ResponseWriter, req *http.Request) {
 		PublicIP:         r.PublicIP,
 		ControlPort:      r.Config.ControlPort,
 		GamePort:         r.Config.GamePort,
+		BedrockPort:      r.Config.BedrockPort,
 		ActivePlayers:    atomic.LoadInt64(&r.ActivePlayers),
 		BytesTransferred: atomic.LoadInt64(&r.GlobalBytes),
 		TunnelConnected:  connected,
