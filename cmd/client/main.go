@@ -398,7 +398,7 @@ func handleStream(stream net.Conn, localAddr, bedrockAddr string, p *tea.Program
 		return
 	}
 	header = strings.TrimSpace(header)
-	
+
 	// Parse protocol and player IP
 	var protocol, playerIP string
 	if strings.HasPrefix(header, "tcp:") {
@@ -412,7 +412,7 @@ func handleStream(stream net.Conn, localAddr, bedrockAddr string, p *tea.Program
 		protocol = "tcp"
 		playerIP = header
 	}
-	
+
 	p.Send(logMsg(fmt.Sprintf("[%s] Player connected: %s", strings.ToUpper(protocol), playerIP)))
 
 	if protocol == "udp" {
@@ -461,7 +461,7 @@ func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr strin
 		p.Send(errorMsg(fmt.Errorf("failed to resolve UDP address: %v", err)))
 		return
 	}
-	
+
 	// Connect to local Bedrock/Geyser server
 	localConn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
@@ -469,9 +469,9 @@ func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr strin
 		return
 	}
 	defer localConn.Close()
-	
+
 	done := make(chan struct{})
-	
+
 	// Stream -> Local UDP (read length-prefixed packets from stream)
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -482,24 +482,24 @@ func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr strin
 			if err != nil {
 				return
 			}
-			
+
 			pktLen := int(lenBuf[0])<<8 | int(lenBuf[1])
 			if pktLen > 65535 {
 				return
 			}
-			
+
 			// Read packet data
 			data := make([]byte, pktLen)
 			_, err = io.ReadFull(bufReader, data)
 			if err != nil {
 				return
 			}
-			
+
 			// Send to local UDP server
 			localConn.Write(data)
 		}
 	}()
-	
+
 	// Local UDP -> Stream (send length-prefixed packets to stream)
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -510,17 +510,17 @@ func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr strin
 			if err != nil {
 				return
 			}
-			
+
 			// Write length prefix
 			lenBuf := make([]byte, 2)
 			lenBuf[0] = byte(n >> 8)
 			lenBuf[1] = byte(n & 0xFF)
-			
+
 			stream.Write(lenBuf)
 			stream.Write(buffer[:n])
 		}
 	}()
-	
+
 	<-done
 	p.Send(logMsg(fmt.Sprintf("[UDP] Player disconnected: %s", playerIP)))
 }
