@@ -10,6 +10,7 @@ import (
 
 	"tunnel/pkg/relay"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -35,7 +36,10 @@ var (
 
 	labelStyle = lipgloss.NewStyle().
 			Foreground(subtleColor).
-			MarginTop(1)
+			Width(14) // Fixed width for alignment
+
+	valueStyle = lipgloss.NewStyle().
+			Foreground(secondaryColor)
 
 	statusStyle = lipgloss.NewStyle().
 			Foreground(highlightColor).
@@ -45,17 +49,23 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(subtleColor).
 			Padding(0, 1).
-			MarginRight(1)
+			MarginRight(1).
+			Width(40).
+			Height(7)
 
 	logBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(subtleColor).
 			Padding(0, 1).
 			MarginTop(1).
-			Width(82) // Wider for logs
+			Width(83) // Match the width of two boxes + margin
 
 	logStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#A0A0A0"))
+	
+	helpStyle = lipgloss.NewStyle().
+			Foreground(subtleColor).
+			MarginTop(1)
 )
 
 // Messages
@@ -75,14 +85,19 @@ type model struct {
 	err       error
 	scanner   *bufio.Scanner
 	connected bool
+	viewport  viewport.Model
 }
 
 func initialModel(apiPort int) model {
+	vp := viewport.New(81, 10)
+	vp.SetContent("Waiting for logs...")
+
 	return model{
 		apiPort:   apiPort,
 		status:    relay.StatusResponse{},
 		logs:      []string{},
 		connected: false,
+		viewport:  vp,
 	}
 }
 
@@ -166,9 +181,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logMsg:
 		if string(msg) != "" {
 			m.logs = append(m.logs, string(msg))
-			if len(m.logs) > 20 {
+			// Keep more logs in memory for scrolling
+			if len(m.logs) > 1000 {
 				m.logs = m.logs[1:]
 			}
+			
+			// Update viewport content
+			var content string
+			for _, l := range m.logs {
+				content += logStyle.Render(l) + "\n"
+			}
+			m.viewport.SetContent(content)
+			m.viewport.GotoBottom()
 		}
 		if m.scanner != nil {
 			return m, readNextLog(m.scanner)
@@ -178,7 +202,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg
 	}
 
-	return m, nil
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
 }
 
 func formatBytes(b int64) string {
@@ -201,7 +227,7 @@ func (m model) View() string {
 		s += lipgloss.NewStyle().Foreground(warningColor).Render("⚠ Server not running or not reachable") + "\n\n"
 		s += lipgloss.NewStyle().Foreground(subtleColor).Render(fmt.Sprintf("Trying to connect to http://localhost:%d...\n", m.apiPort))
 		s += lipgloss.NewStyle().Foreground(subtleColor).Render("Start the server with: tunnel-server start\n")
-		s += "\n" + lipgloss.NewStyle().Foreground(subtleColor).Render("Press 'q' to quit.") + "\n"
+		s += "\n" + helpStyle.Render("Press 'q' to quit.") + "\n"
 		return appStyle.Render(s)
 	}
 
@@ -211,45 +237,62 @@ func (m model) View() string {
 		return appStyle.Render(s)
 	}
 
-	// Box 1: Server Info
-	infoContent := fmt.Sprintf("%s %s\n", labelStyle.Render("Public IP:   "), m.status.PublicIP)
-	infoContent += fmt.Sprintf("%s %d\n", labelStyle.Render("Control Port:"), m.status.ControlPort)
-	infoContent += fmt.Sprintf("%s %d\n", labelStyle.Render("Game Port:   "), m.status.GamePort)
+	// Box 1: Network
+	netContent := fmt.Sprintf("%s%s\n", labelStyle.Render("Public IP:"), valueStyle.Render(m.status.PublicIP))
+	netContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Control Port:"), valueStyle.Render(fmt.Sprintf("%d", m.status.ControlPort)))
+	netContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Game Port:"), valueStyle.Render(fmt.Sprintf("%d", m.status.GamePort)))
+	if m.status.BedrockPort > 0 {
+		netContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Bedrock Port:"), valueStyle.Render(fmt.Sprintf("%d", m.status.BedrockPort)))
+	}
+	netBox := boxStyle.Render(netContent)
 
+	// Box 2: Tunnel
 	statusText := "Disconnected"
 	statusColor := subtleColor
 	if m.status.TunnelConnected {
 		statusText = "Connected"
 		statusColor = highlightColor
 	}
-	infoContent += fmt.Sprintf("%s %s", labelStyle.Render("Tunnel:      "), lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(statusText))
+	tunContent := fmt.Sprintf("%s%s\n", labelStyle.Render("Status:"), lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(statusText))
+	tunContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Remote:"), valueStyle.Render(m.status.TunnelRemoteAddr))
+	tunContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Streams:"), valueStyle.Render(fmt.Sprintf("%d", m.status.NumStreams)))
+	tunBox := boxStyle.Render(tunContent)
 
-	infoBox := boxStyle.Render(infoContent)
+	// Box 3: Players
+	playContent := fmt.Sprintf("%s%s\n", labelStyle.Render("Active:"), valueStyle.Render(fmt.Sprintf("%d", m.status.ActivePlayers)))
+	playContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Peak:"), valueStyle.Render(fmt.Sprintf("%d", m.status.PeakPlayers)))
+	
+	if len(m.status.PlayerList) > 0 {
+		playContent += labelStyle.Render("Clients:") + "\n"
+		for i, p := range m.status.PlayerList {
+			if i >= 2 { // Limit to fit in box
+				playContent += valueStyle.Render(fmt.Sprintf(" +%d more...", len(m.status.PlayerList)-2)) + "\n"
+				break
+			}
+			playContent += valueStyle.Render(fmt.Sprintf(" %s", p)) + "\n"
+		}
+	} else {
+		playContent += labelStyle.Render("No players connected") + "\n"
+	}
+	
+	playBox := boxStyle.Render(playContent)
 
-	// Box 2: Stats
+	// Box 4: Traffic
 	uptime := time.Duration(m.status.UptimeSeconds) * time.Second
-	statsContent := fmt.Sprintf("%s %s\n", labelStyle.Render("Uptime:        "), uptime.String())
-	statsContent += fmt.Sprintf("%s %d\n", labelStyle.Render("Active Players:"), m.status.ActivePlayers)
-	statsContent += fmt.Sprintf("%s %s\n", labelStyle.Render("Traffic:       "), formatBytes(m.status.BytesTransferred))
-	statsBox := boxStyle.Render(statsContent)
+	trafContent := fmt.Sprintf("%s%s\n", labelStyle.Render("Uptime:"), valueStyle.Render(uptime.String()))
+	trafContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Total:"), valueStyle.Render(formatBytes(m.status.BytesTransferred)))
+	trafContent += fmt.Sprintf("%s%s\n", labelStyle.Render("In (Rx):"), valueStyle.Render(formatBytes(m.status.BytesFromPlayers)))
+	trafContent += fmt.Sprintf("%s%s\n", labelStyle.Render("Out (Tx):"), valueStyle.Render(formatBytes(m.status.BytesFromTunnel)))
+	trafBox := boxStyle.Render(trafContent)
 
 	// Join Boxes
-	row1 := lipgloss.JoinHorizontal(lipgloss.Top, infoBox, statsBox)
+	row1 := lipgloss.JoinHorizontal(lipgloss.Top, netBox, tunBox)
+	row2 := lipgloss.JoinHorizontal(lipgloss.Top, playBox, trafBox)
 
-	// Logs
-	var logContent string
-	if len(m.logs) == 0 {
-		logContent = logStyle.Render("Waiting for logs...")
-	} else {
-		for _, l := range m.logs {
-			logContent += logStyle.Render(l) + "\n"
-		}
-	}
+	s += row1 + "\n" + row2 + "\n"
+	s += logBoxStyle.Render(m.viewport.View())
 
-	s += row1 + "\n"
-	s += logBoxStyle.Render(logContent)
-
-	s += "\n\n" + lipgloss.NewStyle().Foreground(subtleColor).Render("Press 'q' to quit.") + "\n"
+	s += "\n" + helpStyle.Render("Press 'q' to quit, up/down to scroll logs.") + "\n"
 
 	return appStyle.Render(s)
 }

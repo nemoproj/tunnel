@@ -24,10 +24,18 @@ type Relay struct {
 	// State
 	tunnelSession *yamux.Session
 	tunnelMutex   sync.Mutex
-	GlobalBytes   int64
+	GlobalBytes   int64 // Deprecated: use BytesFromPlayers + BytesFromTunnel
+	BytesFromPlayers int64
+	BytesFromTunnel  int64
 	ActivePlayers int64
+	PeakPlayers   int64
 	PublicIP      string
+	TunnelRemoteAddr string
 	StartTime     time.Time
+
+	// Players
+	playersMutex sync.Mutex
+	PlayerIPs    map[string]time.Time
 
 	// Logging
 	logBroadcaster *LogBroadcaster
@@ -38,7 +46,9 @@ func New(cfg Config) *Relay {
 		Config:         cfg,
 		logBroadcaster: NewLogBroadcaster(),
 		PublicIP:       "Fetching...",
+		TunnelRemoteAddr: "None",
 		StartTime:      time.Now(),
+		PlayerIPs:      make(map[string]time.Time),
 	}
 }
 
@@ -106,6 +116,7 @@ func (r *Relay) startControlServer() {
 			r.tunnelSession.Close()
 		}
 		r.tunnelSession = session
+		r.TunnelRemoteAddr = conn.RemoteAddr().String()
 		r.tunnelMutex.Unlock()
 
 		r.Log("[Control] Tunnel established")
@@ -143,8 +154,30 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	}
 
 	r.Log(fmt.Sprintf("[Game] Player connected: %s", playerConn.RemoteAddr()))
-	atomic.AddInt64(&r.ActivePlayers, 1)
+	
+	r.playersMutex.Lock()
+	r.PlayerIPs[playerConn.RemoteAddr().String()] = time.Now()
+	r.playersMutex.Unlock()
+
+	newActive := atomic.AddInt64(&r.ActivePlayers, 1)
+	
+	// Update peak players
+	for {
+		peak := atomic.LoadInt64(&r.PeakPlayers)
+		if newActive <= peak {
+			break
+		}
+		if atomic.CompareAndSwapInt64(&r.PeakPlayers, peak, newActive) {
+			break
+		}
+	}
+
 	defer atomic.AddInt64(&r.ActivePlayers, -1)
+	defer func() {
+		r.playersMutex.Lock()
+		delete(r.PlayerIPs, playerConn.RemoteAddr().String())
+		r.playersMutex.Unlock()
+	}()
 
 	stream, err := session.Open()
 	if err != nil {
@@ -165,13 +198,13 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 
 	go func() {
 		// Stream -> Player
-		io.Copy(playerConn, &CountingReader{r: stream, counter: &r.GlobalBytes})
+		io.Copy(playerConn, &CountingReader{r: stream, counter: &r.BytesFromTunnel})
 		done <- struct{}{}
 	}()
 
 	go func() {
 		// Player -> Stream
-		io.Copy(stream, &CountingReader{r: playerConn, counter: &r.GlobalBytes})
+		io.Copy(stream, &CountingReader{r: playerConn, counter: &r.BytesFromPlayers})
 		done <- struct{}{}
 	}()
 
@@ -249,7 +282,23 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 	}
 
 	r.Log(fmt.Sprintf("[Bedrock] Player connected: %s", remoteAddr.String()))
-	atomic.AddInt64(&r.ActivePlayers, 1)
+	
+	r.playersMutex.Lock()
+	r.PlayerIPs[remoteAddr.String()] = time.Now()
+	r.playersMutex.Unlock()
+
+	newActive := atomic.AddInt64(&r.ActivePlayers, 1)
+
+	// Update peak players
+	for {
+		peak := atomic.LoadInt64(&r.PeakPlayers)
+		if newActive <= peak {
+			break
+		}
+		if atomic.CompareAndSwapInt64(&r.PeakPlayers, peak, newActive) {
+			break
+		}
+	}
 
 	stream, err := tunnelSession.Open()
 	if err != nil {
@@ -288,13 +337,18 @@ func (s *bedrockSession) sendToTunnel(data []byte) {
 
 	s.stream.Write(lenBuf)
 	s.stream.Write(data)
-	atomic.AddInt64(&s.relay.GlobalBytes, int64(len(data)+2))
+	atomic.AddInt64(&s.relay.BytesFromPlayers, int64(len(data)+2))
 }
 
 func (s *bedrockSession) readFromTunnel(sessions map[string]*bedrockSession, mutex *sync.Mutex) {
 	defer func() {
 		s.stream.Close()
 		atomic.AddInt64(&s.relay.ActivePlayers, -1)
+		
+		s.relay.playersMutex.Lock()
+		delete(s.relay.PlayerIPs, s.remoteAddr.String())
+		s.relay.playersMutex.Unlock()
+
 		s.relay.Log(fmt.Sprintf("[Bedrock] Player disconnected: %s", s.remoteAddr.String()))
 
 		mutex.Lock()
@@ -324,7 +378,7 @@ func (s *bedrockSession) readFromTunnel(sessions map[string]*bedrockSession, mut
 			return
 		}
 
-		atomic.AddInt64(&s.relay.GlobalBytes, int64(pktLen+2))
+		atomic.AddInt64(&s.relay.BytesFromTunnel, int64(pktLen+2))
 
 		// Send back to UDP client
 		s.udpConn.WriteToUDP(data, s.remoteAddr)

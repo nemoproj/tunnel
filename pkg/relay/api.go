@@ -13,9 +13,15 @@ type StatusResponse struct {
 	ControlPort      int    `json:"control_port"`
 	GamePort         int    `json:"game_port"`
 	BedrockPort      int    `json:"bedrock_port,omitempty"`
-	ActivePlayers    int64  `json:"active_players"`
-	BytesTransferred int64  `json:"bytes_transferred"`
+	ActivePlayers    int64    `json:"active_players"`
+	PeakPlayers      int64    `json:"peak_players"`
+	PlayerList       []string `json:"player_list"`
+	BytesTransferred int64    `json:"bytes_transferred"`
+	BytesFromPlayers int64  `json:"bytes_from_players"`
+	BytesFromTunnel  int64  `json:"bytes_from_tunnel"`
 	TunnelConnected  bool   `json:"tunnel_connected"`
+	TunnelRemoteAddr string `json:"tunnel_remote_addr"`
+	NumStreams       int    `json:"num_streams"`
 	UptimeSeconds    int64  `json:"uptime_seconds"`
 }
 
@@ -38,7 +44,22 @@ func (r *Relay) StartAPI(port int) {
 func (r *Relay) handleStatus(w http.ResponseWriter, req *http.Request) {
 	r.tunnelMutex.Lock()
 	connected := r.tunnelSession != nil && !r.tunnelSession.IsClosed()
+	numStreams := 0
+	if connected {
+		numStreams = r.tunnelSession.NumStreams()
+	}
+	remoteAddr := r.TunnelRemoteAddr
 	r.tunnelMutex.Unlock()
+
+	r.playersMutex.Lock()
+	playerList := make([]string, 0, len(r.PlayerIPs))
+	for ip := range r.PlayerIPs {
+		playerList = append(playerList, ip)
+	}
+	r.playersMutex.Unlock()
+
+	bytesFromPlayers := atomic.LoadInt64(&r.BytesFromPlayers)
+	bytesFromTunnel := atomic.LoadInt64(&r.BytesFromTunnel)
 
 	status := StatusResponse{
 		PublicIP:         r.PublicIP,
@@ -46,8 +67,14 @@ func (r *Relay) handleStatus(w http.ResponseWriter, req *http.Request) {
 		GamePort:         r.Config.GamePort,
 		BedrockPort:      r.Config.BedrockPort,
 		ActivePlayers:    atomic.LoadInt64(&r.ActivePlayers),
-		BytesTransferred: atomic.LoadInt64(&r.GlobalBytes),
+		PeakPlayers:      atomic.LoadInt64(&r.PeakPlayers),
+		PlayerList:       playerList,
+		BytesTransferred: bytesFromPlayers + bytesFromTunnel,
+		BytesFromPlayers: bytesFromPlayers,
+		BytesFromTunnel:  bytesFromTunnel,
 		TunnelConnected:  connected,
+		TunnelRemoteAddr: remoteAddr,
+		NumStreams:       numStreams,
 		UptimeSeconds:    int64(time.Since(r.StartTime).Seconds()),
 	}
 
