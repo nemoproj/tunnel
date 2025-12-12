@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,9 @@ func (r *Relay) StartAPI(port int) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", r.handleStatus)
 	mux.HandleFunc("/logs", r.handleLogs)
+	mux.HandleFunc("/connections", r.handleConnections)
+	mux.HandleFunc("/blocklist", r.handleBlocklist)
+	mux.HandleFunc("/nicknames", r.handleNicknames)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -110,5 +114,174 @@ func (r *Relay) handleLogs(w http.ResponseWriter, req *http.Request) {
 		case <-req.Context().Done():
 			return
 		}
+	}
+}
+
+func (r *Relay) handleConnections(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodDelete {
+		ip := req.URL.Query().Get("ip")
+		if ip == "" {
+			http.Error(w, "Missing ip parameter", http.StatusBadRequest)
+			return
+		}
+
+		if r.Disconnect(ip) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "Disconnected %s", ip)
+		} else {
+			http.Error(w, "Player not found", http.StatusNotFound)
+		}
+		return
+	}
+
+	if req.Method == http.MethodGet {
+		r.playersMutex.Lock()
+		defer r.playersMutex.Unlock()
+
+		type ConnectionInfo struct {
+			IP          string    `json:"ip"`
+			Nickname    string    `json:"nickname"`
+			Type        string    `json:"type"`
+			ConnectedAt time.Time `json:"connected_at"`
+			BytesIn     int64     `json:"bytes_in"`
+			BytesOut    int64     `json:"bytes_out"`
+			Latency     string    `json:"latency"`
+		}
+
+		conns := make([]ConnectionInfo, 0)
+		for ip, t := range r.PlayerIPs {
+			connType := "unknown"
+			if _, ok := r.TCPConns[ip]; ok {
+				connType = "tcp"
+			} else if _, ok := r.UDPSessions[ip]; ok {
+				connType = "udp"
+			}
+			
+			var bytesIn, bytesOut int64
+			if stats, ok := r.PlayerStats[ip]; ok {
+				bytesIn = atomic.LoadInt64(&stats.BytesIn)
+				bytesOut = atomic.LoadInt64(&stats.BytesOut)
+			}
+
+			nickname := r.Nicknames[ip]
+
+			conns = append(conns, ConnectionInfo{
+				IP:          ip,
+				Nickname:    nickname,
+				Type:        connType,
+				ConnectedAt: t,
+				BytesIn:     bytesIn,
+				BytesOut:    bytesOut,
+				Latency:     "N/A", // Placeholder for now
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(conns)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (r *Relay) handleNicknames(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodPost {
+		ip := req.URL.Query().Get("ip")
+		name := req.URL.Query().Get("name")
+		if ip == "" {
+			http.Error(w, "Missing ip parameter", http.StatusBadRequest)
+			return
+		}
+		r.SetNickname(ip, name)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (r *Relay) handleBlocklist(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodPost {
+		ip := req.URL.Query().Get("ip")
+		if ip == "" {
+			http.Error(w, "Missing ip parameter", http.StatusBadRequest)
+			return
+		}
+		r.Block(ip)
+		// Also disconnect if currently connected
+		// We need to find the full address (IP:Port) for the disconnect map
+		// But Disconnect takes the full address key.
+		// We need to iterate connections to find matches.
+		r.disconnectByIP(ip)
+		
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Blocked %s", ip)
+		return
+	}
+
+	if req.Method == http.MethodDelete {
+		ip := req.URL.Query().Get("ip")
+		if ip == "" {
+			http.Error(w, "Missing ip parameter", http.StatusBadRequest)
+			return
+		}
+		r.Unblock(ip)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Unblocked %s", ip)
+		return
+	}
+
+	if req.Method == http.MethodGet {
+		r.playersMutex.Lock()
+		defer r.playersMutex.Unlock()
+
+		type BlockedInfo struct {
+			IP        string    `json:"ip"`
+			BlockedAt time.Time `json:"blocked_at"`
+		}
+
+		blocked := make([]BlockedInfo, 0)
+		for ip, t := range r.BlockedIPs {
+			blocked = append(blocked, BlockedInfo{
+				IP:        ip,
+				BlockedAt: t,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(blocked)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (r *Relay) disconnectByIP(targetIP string) {
+	var tcpConnsToClose []net.Conn
+	var udpSessionsToClose []*bedrockSession
+
+	r.playersMutex.Lock()
+	// Check TCP connections
+	for addr, conn := range r.TCPConns {
+		host, _, _ := net.SplitHostPort(addr)
+		if host == targetIP {
+			tcpConnsToClose = append(tcpConnsToClose, conn)
+		}
+	}
+
+	// Check UDP sessions
+	for addr, session := range r.UDPSessions {
+		host, _, _ := net.SplitHostPort(addr)
+		if host == targetIP {
+			udpSessionsToClose = append(udpSessionsToClose, session)
+		}
+	}
+	r.playersMutex.Unlock()
+
+	// Close connections outside the lock to avoid deadlocks
+	for _, conn := range tcpConnsToClose {
+		conn.Close()
+	}
+	for _, session := range udpSessionsToClose {
+		session.stream.Close()
 	}
 }

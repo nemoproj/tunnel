@@ -1,16 +1,20 @@
 package relay
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
 )
+
+const nicknamesFile = "nicknames.json"
 
 type Config struct {
 	ControlPort int
@@ -36,20 +40,70 @@ type Relay struct {
 	// Players
 	playersMutex sync.Mutex
 	PlayerIPs    map[string]time.Time
+	TCPConns     map[string]net.Conn
+	UDPSessions  map[string]*bedrockSession
+	PlayerStats  map[string]*PlayerStats
+	BlockedIPs   map[string]time.Time
+	Nicknames    map[string]string
 
 	// Logging
 	logBroadcaster *LogBroadcaster
 }
 
+type PlayerStats struct {
+	BytesIn  int64
+	BytesOut int64
+}
+
 func New(cfg Config) *Relay {
-	return &Relay{
+	r := &Relay{
 		Config:         cfg,
 		logBroadcaster: NewLogBroadcaster(),
 		PublicIP:       "Fetching...",
 		TunnelRemoteAddr: "None",
 		StartTime:      time.Now(),
 		PlayerIPs:      make(map[string]time.Time),
+		TCPConns:       make(map[string]net.Conn),
+		UDPSessions:    make(map[string]*bedrockSession),
+		PlayerStats:    make(map[string]*PlayerStats),
+		BlockedIPs:     make(map[string]time.Time),
+		Nicknames:      make(map[string]string),
 	}
+	r.loadNicknames()
+	return r
+}
+
+func (r *Relay) loadNicknames() {
+	file, err := os.Open(nicknamesFile)
+	if err != nil {
+		return // File doesn't exist or can't be opened
+	}
+	defer file.Close()
+
+	json.NewDecoder(file).Decode(&r.Nicknames)
+}
+
+func (r *Relay) saveNicknames() {
+	file, err := os.Create(nicknamesFile)
+	if err != nil {
+		r.Log(fmt.Sprintf("Failed to save nicknames: %v", err))
+		return
+	}
+	defer file.Close()
+
+	json.NewEncoder(file).Encode(r.Nicknames)
+}
+
+func (r *Relay) SetNickname(ip, name string) {
+	r.playersMutex.Lock()
+	defer r.playersMutex.Unlock()
+	
+	if name == "" {
+		delete(r.Nicknames, ip)
+	} else {
+		r.Nicknames[ip] = name
+	}
+	r.saveNicknames()
 }
 
 func (r *Relay) Start() {
@@ -153,10 +207,22 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 		return
 	}
 
+	ip, _, _ := net.SplitHostPort(playerConn.RemoteAddr().String())
+	r.playersMutex.Lock()
+	if _, blocked := r.BlockedIPs[ip]; blocked {
+		r.playersMutex.Unlock()
+		r.Log(fmt.Sprintf("[Game] Blocked connection attempt from %s", ip))
+		return
+	}
+	r.playersMutex.Unlock()
+
 	r.Log(fmt.Sprintf("[Game] Player connected: %s", playerConn.RemoteAddr()))
 	
+	stats := &PlayerStats{}
 	r.playersMutex.Lock()
 	r.PlayerIPs[playerConn.RemoteAddr().String()] = time.Now()
+	r.TCPConns[playerConn.RemoteAddr().String()] = playerConn
+	r.PlayerStats[playerConn.RemoteAddr().String()] = stats
 	r.playersMutex.Unlock()
 
 	newActive := atomic.AddInt64(&r.ActivePlayers, 1)
@@ -176,6 +242,8 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	defer func() {
 		r.playersMutex.Lock()
 		delete(r.PlayerIPs, playerConn.RemoteAddr().String())
+		delete(r.TCPConns, playerConn.RemoteAddr().String())
+		delete(r.PlayerStats, playerConn.RemoteAddr().String())
 		r.playersMutex.Unlock()
 	}()
 
@@ -197,20 +265,56 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	done := make(chan struct{})
 
 	go func() {
-		// Stream -> Player
-		io.Copy(playerConn, &CountingReader{r: stream, counter: &r.BytesFromTunnel})
+		// Stream -> Player (BytesOut)
+		io.Copy(playerConn, &CountingReader{r: stream, counters: []*int64{&r.BytesFromTunnel, &stats.BytesOut}})
 		done <- struct{}{}
 	}()
 
 	go func() {
-		// Player -> Stream
-		io.Copy(stream, &CountingReader{r: playerConn, counter: &r.BytesFromPlayers})
+		// Player -> Stream (BytesIn)
+		io.Copy(stream, &CountingReader{r: playerConn, counters: []*int64{&r.BytesFromPlayers, &stats.BytesIn}})
 		done <- struct{}{}
 	}()
 
 	<-done
 	r.Log(fmt.Sprintf("[Game] Player disconnected: %s", playerConn.RemoteAddr()))
 }
+
+func (r *Relay) Disconnect(ip string) bool {
+	r.playersMutex.Lock()
+	defer r.playersMutex.Unlock()
+
+	// Check TCP connections
+	if conn, ok := r.TCPConns[ip]; ok {
+		conn.Close()
+		// Cleanup happens in handlePlayer defer
+		return true
+	}
+
+	// Check UDP sessions
+	if session, ok := r.UDPSessions[ip]; ok {
+		session.stream.Close()
+		// Cleanup happens in readFromTunnel defer
+		return true
+	}
+
+	return false
+}
+
+func (r *Relay) Block(ip string) {
+	r.playersMutex.Lock()
+	defer r.playersMutex.Unlock()
+	r.BlockedIPs[ip] = time.Now()
+	r.Log(fmt.Sprintf("Blocked IP: %s", ip))
+}
+
+func (r *Relay) Unblock(ip string) {
+	r.playersMutex.Lock()
+	defer r.playersMutex.Unlock()
+	delete(r.BlockedIPs, ip)
+	r.Log(fmt.Sprintf("Unblocked IP: %s", ip))
+}
+
 
 // startBedrockServer starts the UDP listener for Bedrock Edition players (Geyser)
 func (r *Relay) startBedrockServer() {
@@ -229,10 +333,6 @@ func (r *Relay) startBedrockServer() {
 
 	r.Log(fmt.Sprintf("[Bedrock] Listening on :%d (UDP)", r.Config.BedrockPort))
 
-	// Track active Bedrock sessions
-	sessions := make(map[string]*bedrockSession)
-	sessionsMutex := sync.Mutex{}
-
 	buffer := make([]byte, 65535) // Max UDP packet size
 
 	for {
@@ -246,18 +346,18 @@ func (r *Relay) startBedrockServer() {
 		data := make([]byte, n)
 		copy(data, buffer[:n])
 
-		sessionsMutex.Lock()
-		session, exists := sessions[key]
+		r.playersMutex.Lock()
+		session, exists := r.UDPSessions[key]
 		if !exists {
 			// New Bedrock player
-			session = r.createBedrockSession(conn, remoteAddr, sessions, &sessionsMutex)
+			session = r.createBedrockSession(conn, remoteAddr)
 			if session == nil {
-				sessionsMutex.Unlock()
+				r.playersMutex.Unlock()
 				continue
 			}
-			sessions[key] = session
+			r.UDPSessions[key] = session
 		}
-		sessionsMutex.Unlock()
+		r.playersMutex.Unlock()
 
 		// Forward packet to tunnel
 		session.sendToTunnel(data)
@@ -269,10 +369,11 @@ type bedrockSession struct {
 	udpConn    *net.UDPConn
 	remoteAddr *net.UDPAddr
 	stream     net.Conn
+	stats      *PlayerStats
 	done       chan struct{}
 }
 
-func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAddr, sessions map[string]*bedrockSession, mutex *sync.Mutex) *bedrockSession {
+func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAddr) *bedrockSession {
 	r.tunnelMutex.Lock()
 	tunnelSession := r.tunnelSession
 	r.tunnelMutex.Unlock()
@@ -281,11 +382,23 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 		return nil
 	}
 
+	ip := remoteAddr.IP.String()
+	// Note: Caller holds playersMutex, but we need to check BlockedIPs.
+	// Since BlockedIPs is protected by playersMutex (we decided to use the same mutex for simplicity),
+	// we can check it directly.
+	if _, blocked := r.BlockedIPs[ip]; blocked {
+		r.Log(fmt.Sprintf("[Bedrock] Blocked connection attempt from %s", ip))
+		return nil
+	}
+
 	r.Log(fmt.Sprintf("[Bedrock] Player connected: %s", remoteAddr.String()))
 	
-	r.playersMutex.Lock()
+	// Note: Caller holds playersMutex when calling this.
+	// We are just updating PlayerIPs which is protected by playersMutex.
 	r.PlayerIPs[remoteAddr.String()] = time.Now()
-	r.playersMutex.Unlock()
+	
+	stats := &PlayerStats{}
+	r.PlayerStats[remoteAddr.String()] = stats
 
 	newActive := atomic.AddInt64(&r.ActivePlayers, 1)
 
@@ -320,11 +433,12 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 		udpConn:    udpConn,
 		remoteAddr: remoteAddr,
 		stream:     stream,
+		stats:      stats,
 		done:       make(chan struct{}),
 	}
 
 	// Start goroutine to read from tunnel and send back to UDP client
-	go session.readFromTunnel(sessions, mutex)
+	go session.readFromTunnel()
 
 	return session
 }
@@ -337,23 +451,23 @@ func (s *bedrockSession) sendToTunnel(data []byte) {
 
 	s.stream.Write(lenBuf)
 	s.stream.Write(data)
-	atomic.AddInt64(&s.relay.BytesFromPlayers, int64(len(data)+2))
+	n := int64(len(data) + 2)
+	atomic.AddInt64(&s.relay.BytesFromPlayers, n)
+	atomic.AddInt64(&s.stats.BytesIn, n)
 }
 
-func (s *bedrockSession) readFromTunnel(sessions map[string]*bedrockSession, mutex *sync.Mutex) {
+func (s *bedrockSession) readFromTunnel() {
 	defer func() {
 		s.stream.Close()
 		atomic.AddInt64(&s.relay.ActivePlayers, -1)
 		
 		s.relay.playersMutex.Lock()
 		delete(s.relay.PlayerIPs, s.remoteAddr.String())
+		delete(s.relay.UDPSessions, s.remoteAddr.String())
+		delete(s.relay.PlayerStats, s.remoteAddr.String())
 		s.relay.playersMutex.Unlock()
 
 		s.relay.Log(fmt.Sprintf("[Bedrock] Player disconnected: %s", s.remoteAddr.String()))
-
-		mutex.Lock()
-		delete(sessions, s.remoteAddr.String())
-		mutex.Unlock()
 
 		close(s.done)
 	}()
@@ -378,7 +492,9 @@ func (s *bedrockSession) readFromTunnel(sessions map[string]*bedrockSession, mut
 			return
 		}
 
-		atomic.AddInt64(&s.relay.BytesFromTunnel, int64(pktLen+2))
+		n := int64(pktLen + 2)
+		atomic.AddInt64(&s.relay.BytesFromTunnel, n)
+		atomic.AddInt64(&s.stats.BytesOut, n)
 
 		// Send back to UDP client
 		s.udpConn.WriteToUDP(data, s.remoteAddr)
@@ -387,14 +503,16 @@ func (s *bedrockSession) readFromTunnel(sessions map[string]*bedrockSession, mut
 
 // CountingReader wraps an io.Reader and counts bytes read
 type CountingReader struct {
-	r       io.Reader
-	counter *int64
+	r        io.Reader
+	counters []*int64
 }
 
 func (c *CountingReader) Read(p []byte) (n int, err error) {
 	n, err = c.r.Read(p)
 	if n > 0 {
-		atomic.AddInt64(c.counter, int64(n))
+		for _, counter := range c.counters {
+			atomic.AddInt64(counter, int64(n))
+		}
 	}
 	return
 }
