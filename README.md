@@ -14,30 +14,6 @@ Tunnel Relay는 공인 IPv4 주소가 없는 로컬 마인크래프트 서버를
 - **REST API**: 모니터링 및 로그 스트리밍을 위한 HTTP API
 - **크로스 플랫폼**: Linux, macOS, Windows 지원
 
-## 아키텍처
-
-### 네트워크 흐름
-
-```mermaid
-graph LR
-    Player["플레이어 (Client)"] -- "TCP:25565" --> Relay["Oracle Cloud (Relay)"]
-    Relay -- "Yamux Tunnel (TCP:8080)" --> Host["Local Server (Host)"]
-    Host -- "TCP:25565" --> MC["Minecraft (Target)"]
-```
-
-1. **릴레이 서버**: Oracle Cloud VPS에서 실행
-   - 포트 `8080`: 호스트 클라이언트 연결용 제어 채널
-   - 포트 `25565`: 플레이어 게임 접속용
-
-2. **호스트 (클라이언트)**: 로컬 머신의 마인크래프트 서버에서 실행
-   - 릴레이의 `8080` 포트로 아웃바운드 TCP 연결 시작
-   - 로컬 `localhost:25565`로 트래픽 프록시
-
-3. **Yamux 멀티플렉싱**:
-   - 릴레이와 호스트 간 단일 TCP 연결
-   - 각 플레이어 연결에 대한 가상 스트림 생성
-   - 연결 오버헤드 감소
-
 ## 빠른 시작
 
 ### 사전 요구사항

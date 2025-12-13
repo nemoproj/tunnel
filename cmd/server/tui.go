@@ -128,10 +128,6 @@ type model struct {
 	inputMode   bool
 	textInput   textinput.Model
 	targetIP    string
-
-	// Graph data
-	trafficHistory []int64
-	lastBytes      int64
 }
 
 type BlockedInfo struct {
@@ -163,7 +159,6 @@ func initialModel(apiPort int) model {
 		connected:   false,
 		viewport:    vp,
 		textInput:   ti,
-		trafficHistory: make([]int64, 0),
 	}
 }
 
@@ -458,24 +453,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case statusMsg:
-		// Update traffic history
-		currentBytes := int64(msg.BytesTransferred)
-		if m.lastBytes == 0 {
-			// First data point - just initialize, don't calculate delta
-			m.lastBytes = currentBytes
-		} else {
-			delta := currentBytes - m.lastBytes
-			if delta < 0 {
-				delta = 0
-			}
-			m.trafficHistory = append(m.trafficHistory, delta)
-			// Keep last 80 points (approx width of graph)
-			if len(m.trafficHistory) > 80 {
-				m.trafficHistory = m.trafficHistory[1:]
-			}
-			m.lastBytes = currentBytes
-		}
-
 		m.status = relay.StatusResponse(msg)
 		m.err = nil
 		m.connected = true
@@ -643,12 +620,6 @@ func (m model) View() string {
 
 		s += row1 + "\n" + row2 + "\n"
 
-		// Traffic Graph
-		if len(m.trafficHistory) > 0 {
-			graphContent := "Traffic (Bytes/sec)\n" + renderGraph(m.trafficHistory, 79, 4)
-			s += logBoxStyle.Render(graphContent) + "\n"
-		}
-
 		s += logBoxStyle.Render(m.viewport.View())
 
 		s += "\n" + helpStyle.Render("Tab: Switch View • q: Quit • ↑/↓: Scroll Logs") + "\n"
@@ -744,65 +715,4 @@ func (m model) View() string {
 	}
 
 	return appStyle.Render(s)
-}
-
-func renderGraph(data []int64, width, height int) string {
-	if len(data) == 0 {
-		return ""
-	}
-	max := int64(0)
-	for _, v := range data {
-		if v > max {
-			max = v
-		}
-	}
-	if max == 0 {
-		max = 1
-	}
-
-	bars := []rune{'\u2581', '\u2582', '\u2583', '\u2584', '\u2585', '\u2586', '\u2587', '\u2588'}
-	lines := make([][]rune, height)
-	for i := range lines {
-		lines[i] = make([]rune, width)
-		for j := range lines[i] {
-			lines[i][j] = ' '
-		}
-	}
-
-	// We want to plot the last `width` points
-	start := 0
-	if len(data) > width {
-		start = len(data) - width
-	}
-
-	for x, val := range data[start:] {
-		if x >= width {
-			break
-		}
-
-		totalLevels := int(float64(val) / float64(max) * float64(height*8))
-		if val > 0 && totalLevels == 0 {
-			totalLevels = 1
-		}
-
-		fullBlocks := totalLevels / 8
-		remainder := totalLevels % 8
-
-		for y := 0; y < height; y++ {
-			row := height - 1 - y
-			if y < fullBlocks {
-				lines[row][x] = '█'
-			} else if y == fullBlocks && remainder > 0 {
-				lines[row][x] = bars[remainder-1]
-			} else {
-				lines[row][x] = ' '
-			}
-		}
-	}
-
-	var sb strings.Builder
-	for _, line := range lines {
-		sb.WriteString(string(line) + "\n")
-	}
-	return sb.String()
 }
