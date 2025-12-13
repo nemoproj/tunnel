@@ -11,7 +11,8 @@
 | 플래그 | 기본값 | 설명 |
 |--------|--------|------|
 | `--control-port` | 8080 | 호스트 클라이언트 연결 수락 포트 |
-| `--game-port` | 25565 | 플레이어 연결 수락 포트 |
+| `--game-port` | 25565 | 플레이어 연결 수락 포트 (Java Edition) |
+| `--bedrock-port` | 0 | Bedrock Edition/Geyser 플레이어 연결 포트 (UDP, 0은 비활성화) |
 | `--api-port` | 6060 | REST API 포트 |
 | `--monitor` | false | 서버 대신 TUI 모니터 실행 |
 | `--daemon` | false | 데몬 모드용 내부 플래그 |
@@ -31,7 +32,8 @@
 | 설정 | 기본값 | 설명 |
 |------|--------|------|
 | 릴레이 서버 주소 | `134.185.100.194:8080` | 릴레이 서버 주소 |
-| 로컬 서버 주소 | `localhost:25565` | 로컬 마인크래프트 서버 주소 |
+| 로컬 서버 주소 | `localhost:25565` | 로컬 마인크래프트 Java Edition 서버 주소 |
+| 로컬 Bedrock 주소 | `localhost:19132` | 로컬 Bedrock/Geyser 서버 주소 (비활성화하려면 비워둠) |
 | 공용 게임 포트 | `25565` | 사용자에게 표시되는 포트 |
 
 ## 파일 위치
@@ -64,7 +66,12 @@
 - **게임 포트 (25565)**: 플레이어 연결용
   - 프로토콜: TCP
   - 방향: 인바운드 (릴레이 서버로)
-  - 용도: 마인크래프트 게임 트래픽
+  - 용도: 마인크래프트 Java Edition 게임 트래픽
+
+- **Bedrock 포트 (19132)**: Bedrock Edition 플레이어 연결용
+  - 프로토콜: UDP
+  - 방향: 인바운드 (릴레이 서버로)
+  - 용도: 마인크래프트 Bedrock Edition/Geyser 게임 트래픽
 
 - **API 포트 (6060)**: 모니터링 및 로그용
   - 프로토콜: TCP
@@ -75,7 +82,7 @@
 
 ```bash
 # 사용자 정의 포트
-./bin/tunnel-server start --control-port=9000 --game-port=30000 --api-port=8080
+./bin/tunnel-server start --control-port=9000 --game-port=30000 --bedrock-port=19132 --api-port=8080
 ```
 
 ### 방화벽 구성
@@ -86,6 +93,7 @@
 # 포트 영구 추가
 sudo firewall-cmd --permanent --add-port=8080/tcp
 sudo firewall-cmd --permanent --add-port=25565/tcp
+sudo firewall-cmd --permanent --add-port=19132/udp
 sudo firewall-cmd --permanent --add-port=6060/tcp
 sudo firewall-cmd --reload
 
@@ -102,6 +110,7 @@ sudo ufw enable
 # 규칙 추가
 sudo ufw allow 8080/tcp
 sudo ufw allow 25565/tcp
+sudo ufw allow 19132/udp
 sudo ufw allow 6060/tcp
 
 # 상태 확인
@@ -114,6 +123,7 @@ sudo ufw status
 # 특정 포트 허용
 sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 25565 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 19132 -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 6060 -j ACCEPT
 
 # 규칙 저장 (배포판에 따라 다름)
@@ -126,10 +136,16 @@ sudo iptables-save > /etc/iptables/rules.v4
 
 1. VCN → 보안 목록으로 이동
 2. 인그레스 규칙 추가:
-   - 소스 유형: CIDR
-   - 소스 CIDR: `0.0.0.0/0`
-   - IP 프로토콜: TCP
-   - 대상 포트 범위: `8080,25565,6060`
+   - **TCP 포트용:**
+     - 소스 유형: CIDR
+     - 소스 CIDR: `0.0.0.0/0`
+     - IP 프로토콜: TCP
+     - 대상 포트 범위: `8080,25565,6060`
+   - **UDP 포트용 (Bedrock/Geyser):**
+     - 소스 유형: CIDR
+     - 소스 CIDR: `0.0.0.0/0`
+     - IP 프로토콜: UDP
+     - 대상 포트 범위: `19132`
 
 #### AWS EC2
 
@@ -138,6 +154,9 @@ sudo iptables-save > /etc/iptables/rules.v4
    - 유형: 사용자 정의 TCP
    - 포트 범위: `8080, 25565, 6060`
    - 소스: `0.0.0.0/0`
+   - 유형: 사용자 정의 UDP
+   - 포트 범위: `19132`
+   - 소스: `0.0.0.0/0`
 
 #### Google Cloud
 
@@ -145,7 +164,7 @@ sudo iptables-save > /etc/iptables/rules.v4
 2. 방화벽 규칙 생성:
    - 대상: 네트워크의 모든 인스턴스
    - 소스 IP 범위: `0.0.0.0/0`
-   - 프로토콜 및 포트: `tcp:8080, tcp:25565, tcp:6060`
+   - 프로토콜 및 포트: `tcp:8080, tcp:25565, udp:19132, tcp:6060`
 
 ## Yamux 구성
 

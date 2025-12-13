@@ -342,6 +342,8 @@ func (r *Relay) startBedrockServer() {
 			continue
 		}
 
+		r.Log(fmt.Sprintf("[Bedrock] Received %d bytes from %s", n, remoteAddr.String()))
+
 		key := remoteAddr.String()
 		data := make([]byte, n)
 		copy(data, buffer[:n])
