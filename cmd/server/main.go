@@ -120,7 +120,11 @@ func handleStatus(pidFile string, apiPort int) {
 }
 
 func runMonitor(apiPort int) {
-	p := tea.NewProgram(initialModel(apiPort))
+	p := tea.NewProgram(
+		NewModel(apiPort),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running monitor: %v\n", err)
 		os.Exit(1)

@@ -151,10 +151,20 @@ func (r *Relay) handleConnections(w http.ResponseWriter, req *http.Request) {
 		conns := make([]ConnectionInfo, 0)
 		for ip, t := range r.PlayerIPs {
 			connType := "unknown"
+			hasTCP := false
+			hasUDP := false
+			
 			if _, ok := r.TCPConns[ip]; ok {
 				connType = "tcp"
+				hasTCP = true
 			} else if _, ok := r.UDPSessions[ip]; ok {
 				connType = "udp"
+				hasUDP = true
+			}
+			
+			// Skip connections without streams (crawlers/HTTP clients)
+			if !hasTCP && !hasUDP {
+				continue
 			}
 			
 			var bytesIn, bytesOut int64
