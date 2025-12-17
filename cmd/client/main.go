@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -15,45 +16,67 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 65535)
+	},
+}
+
 // Styles
 var (
-	primaryColor   = lipgloss.Color("#7D56F4")
-	secondaryColor = lipgloss.Color("#FAFAFA")
-	subtleColor    = lipgloss.Color("#626262")
-	highlightColor = lipgloss.Color("#04B575")
-	errorColor     = lipgloss.Color("#FF5555")
+	// Shadcn-inspired Zinc Palette
+	cText      = lipgloss.Color("#FAFAFA") // Zinc 50
+	cSubtext   = lipgloss.Color("#A1A1AA") // Zinc 400
+	cBorder    = lipgloss.Color("#52525B") // Zinc 600
+	cFocus     = lipgloss.Color("#FAFAFA") // Zinc 50
+	cSuccess   = lipgloss.Color("#22C55E") // Green 500
+	cError     = lipgloss.Color("#EF4444") // Red 500
+	cBackground = lipgloss.Color("#09090B") // Zinc 950
 
 	appStyle = lipgloss.NewStyle().
-			Margin(1, 2)
+			Margin(1, 1).
+			Padding(1, 2).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(cBorder)
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(secondaryColor).
-			Background(primaryColor).
-			Padding(0, 1).
-			MarginBottom(1)
+			Foreground(cText).
+			MarginBottom(1).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(cBorder).
+			Width(60) // Match log box width
 
 	labelStyle = lipgloss.NewStyle().
-			Foreground(subtleColor).
-			MarginTop(1)
+			Foreground(cSubtext).
+			MarginTop(1).
+			MarginBottom(0)
+
+	// Input styles
+	inputBaseStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(cBorder).
+			Padding(0, 1).
+			Width(58)
+
+	inputFocusedStyle = inputBaseStyle.Copy().
+			BorderForeground(cFocus)
 
 	statusStyle = lipgloss.NewStyle().
-			Foreground(highlightColor).
+			Foreground(cSuccess).
 			Bold(true)
 
 	logBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(subtleColor).
+			BorderForeground(cBorder).
 			Padding(0, 1).
 			MarginTop(1).
-			Width(60)
+			Width(60).
+			Height(12)
 
 	logStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#A0A0A0"))
-
-	focusedStyle = lipgloss.NewStyle().Foreground(primaryColor)
-	blurredStyle = lipgloss.NewStyle().Foreground(subtleColor)
-	cursorStyle  = focusedStyle.Copy()
+			Foreground(cSubtext)
 )
 
 // Messages
@@ -108,31 +131,24 @@ func initialModel(configChan chan configReadyMsg) model {
 	var t textinput.Model
 	for i := range m.inputs {
 		t = textinput.New()
-		t.Cursor.Style = cursorStyle
+		t.Cursor.Style = lipgloss.NewStyle().Foreground(cText)
 		t.CharLimit = 64
+		t.Prompt = "" // Clean look, no prompt
 
 		switch i {
 		case 0:
-			t.Placeholder = "Relay Server (e.g. OCI instance 134.185.100.194:8080)"
+			t.Placeholder = "Relay Server (e.g. 134.185.100.194:8080)"
 			t.SetValue("134.185.100.194:8080")
 			t.Focus()
-			t.PromptStyle = focusedStyle
-			t.TextStyle = focusedStyle
 		case 1:
 			t.Placeholder = "Local Java Server (e.g. localhost:25565)"
 			t.SetValue("localhost:25565")
-			t.PromptStyle = blurredStyle
-			t.TextStyle = blurredStyle
 		case 2:
-			t.Placeholder = "Local Bedrock/Geyser (e.g. localhost:19132, blank to disable)"
+			t.Placeholder = "Local Bedrock/Geyser (e.g. localhost:19132)"
 			t.SetValue("localhost:19132")
-			t.PromptStyle = blurredStyle
-			t.TextStyle = blurredStyle
 		case 3:
 			t.Placeholder = "Public Game Port (e.g. 25565)"
 			t.SetValue("25565")
-			t.PromptStyle = blurredStyle
-			t.TextStyle = blurredStyle
 		}
 
 		m.inputs[i] = t
@@ -204,15 +220,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds := make([]tea.Cmd, len(m.inputs))
 				for i := 0; i <= len(m.inputs)-1; i++ {
 					if i == m.focusIndex {
-						// Set focused state
 						cmds[i] = m.inputs[i].Focus()
-						m.inputs[i].PromptStyle = focusedStyle
-						m.inputs[i].TextStyle = focusedStyle
 					} else {
-						// Remove focused state
 						m.inputs[i].Blur()
-						m.inputs[i].PromptStyle = blurredStyle
-						m.inputs[i].TextStyle = blurredStyle
 					}
 				}
 
@@ -262,24 +272,30 @@ func (m model) View() string {
 	var s string
 
 	if m.state == stateConfig {
-		s = titleStyle.Render("Tunnel Setup (SERVER HOST)") + "\n\n"
-		s += "Enter the details for your connection:\n"
+		s = titleStyle.Render("Tunnel Setup") + "\n\n"
+		s += lipgloss.NewStyle().Foreground(cSubtext).Render("Enter connection details:") + "\n\n"
 
 		labels := []string{
-			"Relay Server Control Address",
-			"Local Java Server Address",
-			"Local Bedrock/Geyser Address (blank to disable)",
-			"Public Game Port (for display)",
+			"Relay Server",
+			"Local Java Server",
+			"Local Bedrock/Geyser",
+			"Public Game Port",
 		}
 
 		for i := range m.inputs {
 			s += labelStyle.Render(labels[i]) + "\n"
-			s += m.inputs[i].View() + "\n"
+
+			var style lipgloss.Style
+			if i == m.focusIndex {
+				style = inputFocusedStyle
+			} else {
+				style = inputBaseStyle
+			}
+
+			s += style.Render(m.inputs[i].View()) + "\n"
 		}
 
-		s += "\n" + lipgloss.NewStyle().Foreground(subtleColor).Render("• Tab/Shift+Tab: Navigate fields") + "\n"
-		s += lipgloss.NewStyle().Foreground(subtleColor).Render("• Enter: Connect to Relay") + "\n"
-		s += lipgloss.NewStyle().Foreground(subtleColor).Render("• Ctrl+C: Quit") + "\n"
+		s += "\n" + lipgloss.NewStyle().Foreground(cSubtext).Render("• Tab/Shift+Tab: Navigate  • Enter: Connect  • Ctrl+C: Quit") + "\n"
 	} else {
 		// Running View
 		host, _, _ := net.SplitHostPort(m.serverAddr)
@@ -290,10 +306,13 @@ func (m model) View() string {
 		s = titleStyle.Render("Tunnel Host") + "\n\n"
 
 		// Info Grid
-		s += fmt.Sprintf("%s %s\n", labelStyle.Render("Relay Server:  "), m.serverAddr)
-		s += fmt.Sprintf("%s %s\n", labelStyle.Render("Local Server:  "), m.localAddr)
-		s += fmt.Sprintf("%s %s:%d\n", labelStyle.Render("Public Address:"), host, m.gamePort)
-		s += fmt.Sprintf("%s %s\n\n", labelStyle.Render("Status:        "), statusStyle.Render(m.status))
+		keyStyle := lipgloss.NewStyle().Foreground(cSubtext).Width(16)
+		valStyle := lipgloss.NewStyle().Foreground(cText)
+
+		s += fmt.Sprintf("%s%s\n", keyStyle.Render("Relay Server"), valStyle.Render(m.serverAddr))
+		s += fmt.Sprintf("%s%s\n", keyStyle.Render("Local Server"), valStyle.Render(m.localAddr))
+		s += fmt.Sprintf("%s%s\n", keyStyle.Render("Public Address"), valStyle.Render(fmt.Sprintf("%s:%d", host, m.gamePort)))
+		s += fmt.Sprintf("%s%s\n\n", keyStyle.Render("Status"), statusStyle.Render(m.status))
 
 		// Logs
 		var logContent string
@@ -305,10 +324,10 @@ func (m model) View() string {
 			}
 		}
 
-		s += "Logs:"
+		s += labelStyle.Render("Activity Log") + "\n"
 		s += logBoxStyle.Render(logContent)
 
-		s += "\n\n" + lipgloss.NewStyle().Foreground(subtleColor).Render("Press 'q' to quit.") + "\n"
+		s += "\n\n" + lipgloss.NewStyle().Foreground(cSubtext).Render("Press 'q' to quit.") + "\n"
 	}
 
 	return appStyle.Render(s)
@@ -347,6 +366,12 @@ func runHost(serverAddr, localAddr, bedrockAddr string, p *tea.Program) {
 	p.Send(statusMsg("Connected to Relay"))
 	p.Send(logMsg(fmt.Sprintf("Connected to %s (%s)", serverAddr, conn.RemoteAddr().String())))
 
+	// Enable TCP Keepalives
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	// 2. Setup Yamux Client
 	// Capture yamux logs to the UI
 	r, w := io.Pipe()
@@ -361,6 +386,7 @@ func runHost(serverAddr, localAddr, bedrockAddr string, p *tea.Program) {
 
 	config := yamux.DefaultConfig()
 	config.KeepAliveInterval = 10 * time.Second
+	config.MaxStreamWindowSize = 1024 * 1024 // 1MB
 	config.LogOutput = w
 
 	session, err := yamux.Client(conn, config)
@@ -489,21 +515,25 @@ func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr strin
 			}
 
 			// Read packet data
-			data := make([]byte, pktLen)
-			_, err = io.ReadFull(bufReader, data)
+			buf := bufferPool.Get().([]byte)
+			_, err = io.ReadFull(bufReader, buf[:pktLen])
 			if err != nil {
+				bufferPool.Put(buf)
 				return
 			}
 
 			// Send to local UDP server
-			localConn.Write(data)
+			localConn.Write(buf[:pktLen])
+			bufferPool.Put(buf)
 		}
 	}()
 
 	// Local UDP -> Stream (send length-prefixed packets to stream)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buffer := make([]byte, 65535)
+		buffer := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buffer)
+		
 		for {
 			localConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			n, err := localConn.Read(buffer)

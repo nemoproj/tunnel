@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 var (
@@ -24,10 +26,11 @@ func DefaultPidFile() string {
 // DefaultLogFile returns the default log file path
 func DefaultLogFile() string {
 	home, err := os.UserHomeDir()
+	date := time.Now().Format("2006-01-02")
 	if err != nil {
-		return "/tmp/tunnel-relay.log"
+		return fmt.Sprintf("/tmp/tunnel-relay-%s.log", date)
 	}
-	return filepath.Join(home, ".tunnel-relay.log")
+	return filepath.Join(home, fmt.Sprintf(".tunnel-relay-%s.log", date))
 }
 
 // WritePid writes the current process PID to the pid file

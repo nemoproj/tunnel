@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,9 +61,10 @@ type Model struct {
 	logs        []string
 	
 	// UI State
-	view      ViewMode
-	err       error
-	connected bool
+	view          ViewMode
+	logFullscreen bool
+	err           error
+	connected     bool
 	ready     bool
 	showHelp  bool
 	width     int
@@ -149,33 +151,81 @@ var DefaultKeys = KeyMap{
 // ============================================================================
 
 var (
-	colorPrimary   = lipgloss.Color("#3B82F6")
-	colorSecondary = lipgloss.Color("#FAFAFA")
-	colorSubtle    = lipgloss.Color("#626262")
-	colorSuccess   = lipgloss.Color("#04B575")
-	colorError     = lipgloss.Color("#FF5555")
-	colorWarning   = lipgloss.Color("#FFAA00")
+	// Shadcn-inspired Zinc Palette
+	cText      = lipgloss.Color("#FAFAFA") // Zinc 50
+	cSubtext   = lipgloss.Color("#A1A1AA") // Zinc 400
+	cBorder    = lipgloss.Color("#52525B") // Zinc 600
+	cFocus     = lipgloss.Color("#FAFAFA") // Zinc 50
+	cSuccess   = lipgloss.Color("#22C55E") // Green 500
+	cWarning   = lipgloss.Color("#F59E0B") // Amber 500
+	cError     = lipgloss.Color("#EF4444") // Red 500
+	cBackground = lipgloss.Color("#09090B") // Zinc 950
+	cCard      = lipgloss.Color("#18181B") // Zinc 900
 )
 
 var (
-	styleApp = lipgloss.NewStyle().Margin(1, 2)
+	styleApp = lipgloss.NewStyle().
+			Margin(1, 1).
+			Padding(1, 2).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(cBorder)
 
 	styleTitle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorSecondary).
-			Background(colorPrimary).
+			Foreground(cText).
+			MarginBottom(1).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(cBorder).
+			Width(40)
+
+	styleTitleIcon = lipgloss.NewStyle().
+			Foreground(cText).
+			Bold(true)
+
+	styleLabel = lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Width(13).
+			Bold(false)
+	
+	styleValue = lipgloss.NewStyle().
+			Foreground(cText).
+			Bold(true)
+	
+	styleHelp = lipgloss.NewStyle().
+			Foreground(cSubtext).
+			MarginTop(1).
+			Padding(0, 1)
+
+	styleTabActive = lipgloss.NewStyle().
+			Foreground(cBackground).
+			Background(cText).
+			Padding(0, 2).
+			Bold(true).
+			MarginRight(1)
+	
+	styleTabInactive = lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Padding(0, 2).
+			MarginRight(1)
+
+	styleTableHeader = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(cText).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(cBorder).
+			BorderBottom(true).
+			Padding(0, 1)
+	
+	styleTableSelected = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(cText).
+			Background(cCard)
+	
+	styleStatusBadge = lipgloss.NewStyle().
+			Bold(true).
 			Padding(0, 1).
-			MarginBottom(1)
-
-	styleLabel = lipgloss.NewStyle().Foreground(colorSubtle).Width(14)
-	styleValue = lipgloss.NewStyle().Foreground(colorSecondary)
-	styleHelp  = lipgloss.NewStyle().Foreground(colorSubtle).MarginTop(1)
-
-	styleTabActive   = lipgloss.NewStyle().Foreground(colorSecondary).Background(colorPrimary).Padding(0, 1).Bold(true)
-	styleTabInactive = lipgloss.NewStyle().Foreground(colorSubtle).Padding(0, 1)
-
-	styleTableHeader   = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary).BorderStyle(lipgloss.NormalBorder()).BorderForeground(colorSubtle).BorderBottom(true)
-	styleTableSelected = lipgloss.NewStyle().Bold(true).Foreground(colorSuccess)
+			MarginLeft(1)
 )
 
 // ============================================================================
@@ -186,7 +236,7 @@ func NewModel(apiPort int) Model {
 	// Spinner
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	s.Style = lipgloss.NewStyle().Foreground(cText)
 
 	// Viewport for logs
 	vp := viewport.New(80, 10)
@@ -197,6 +247,9 @@ func NewModel(apiPort int) Model {
 	ti.Placeholder = "Enter nickname..."
 	ti.CharLimit = 32
 	ti.Width = 30
+	ti.Cursor.Style = lipgloss.NewStyle().Foreground(cText)
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(cSubtext)
+	ti.TextStyle = lipgloss.NewStyle().Foreground(cText)
 
 	// Tables
 	connTable := newConnectionsTable()
@@ -223,8 +276,8 @@ func newConnectionsTable() table.Model {
 		{Title: "Nickname", Width: 15},
 		{Title: "Type", Width: 8},
 		{Title: "Connected", Width: 20},
-		{Title: "Rx", Width: 12},
-		{Title: "Tx", Width: 12},
+		{Title: "↓ Rx", Width: 12},
+		{Title: "↑ Tx", Width: 12},
 	}
 
 	t := table.New(
@@ -236,6 +289,7 @@ func newConnectionsTable() table.Model {
 	styles := table.DefaultStyles()
 	styles.Header = styleTableHeader
 	styles.Selected = styleTableSelected
+	styles.Cell = lipgloss.NewStyle().Foreground(cText).Padding(0, 1)
 	t.SetStyles(styles)
 
 	return t
@@ -256,6 +310,7 @@ func newBlocklistTable() table.Model {
 	styles := table.DefaultStyles()
 	styles.Header = styleTableHeader
 	styles.Selected = styleTableSelected
+	styles.Cell = lipgloss.NewStyle().Foreground(cText).Padding(0, 1)
 	t.SetStyles(styles)
 
 	return t
@@ -522,6 +577,19 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleDashboardKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Enter):
+		m.logFullscreen = !m.logFullscreen
+		m.updateLayout()
+		return m, nil
+	case key.Matches(msg, m.keys.Escape):
+		if m.logFullscreen {
+			m.logFullscreen = false
+			m.updateLayout()
+			return m, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
 	return m, cmd
@@ -595,13 +663,21 @@ func (m Model) handleStatus(msg statusMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleConnections(msg connectionsMsg) (tea.Model, tea.Cmd) {
-	m.connections = []ConnectionInfo(msg)
+	conns := []ConnectionInfo(msg)
+	sort.Slice(conns, func(i, j int) bool {
+		return conns[i].IP < conns[j].IP
+	})
+	m.connections = conns
 	m.updateConnectionsTable()
 	return m, nil
 }
 
 func (m Model) handleBlocklist(msg blockedMsg) (tea.Model, tea.Cmd) {
-	m.blocked = []BlockedInfo(msg)
+	blocked := []BlockedInfo(msg)
+	sort.Slice(blocked, func(i, j int) bool {
+		return blocked[i].IP < blocked[j].IP
+	})
+	m.blocked = blocked
 	m.updateBlocklistTable()
 	return m, nil
 }
@@ -643,71 +719,147 @@ func (m Model) handleError(msg errMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if !m.ready {
-		return "Initializing..."
+		return lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Padding(2).
+			Render("⚙ Initializing monitor...")
 	}
 
 	if m.inputMode {
 		return m.renderInputOverlay()
 	}
 
-	s := styleTitle.Render("Tunnel Relay Monitor") + "\n\n"
+	if m.logFullscreen {
+		return m.renderFullscreenLog()
+	}
+
+	// Header with icon
+	header := lipgloss.NewStyle().
+		MarginBottom(1).
+		Render(
+			lipgloss.JoinHorizontal(
+				lipgloss.Center,
+				styleTitle.Render(styleTitleIcon.Render(" ")+"TUNNEL RELAY MONITOR"),
+			),
+		)
+
+	var content string
 
 	if m.err != nil && !m.connected {
-		return styleApp.Render(s + m.renderConnectionError())
+		content = m.renderConnectionError()
+	} else {
+		if m.err != nil {
+			errorBanner := lipgloss.NewStyle().
+				Foreground(cError).
+				Background(cCard).
+				Padding(0, 1).
+				MarginBottom(1).
+				Render("⚠ "+fmt.Sprintf("Error: %v", m.err))
+			content = errorBanner + "\n\n"
+		}
+
+		content += m.renderTabs() + "\n"
+
+		switch m.view {
+		case ViewDashboard:
+			content += m.renderDashboard()
+		case ViewConnections:
+			content += m.renderConnections()
+		case ViewBlocklist:
+			content += m.renderBlocklist()
+		}
+
+		content += "\n" + m.renderHelpBar()
 	}
 
-	if m.err != nil {
-		s += lipgloss.NewStyle().Foreground(colorError).Render(fmt.Sprintf("Error: %v", m.err)) + "\n\n"
-	}
-
-	s += m.renderTabs() + "\n\n"
-
-	switch m.view {
-	case ViewDashboard:
-		s += m.renderDashboard()
-	case ViewConnections:
-		s += m.renderConnections()
-	case ViewBlocklist:
-		s += m.renderBlocklist()
-	}
-
-	s += "\n" + m.renderHelpBar()
-
-	return styleApp.Render(s)
+	return styleApp.Render(header + "\n" + content)
 }
 
 func (m Model) renderConnectionError() string {
-	s := lipgloss.NewStyle().Foreground(colorWarning).Render("Server not running or not reachable") + "\n\n"
-	s += m.spinner.View() + " " + lipgloss.NewStyle().Foreground(colorSubtle).Render(fmt.Sprintf("Connecting to %s...\n", m.httpAddr))
-	s += lipgloss.NewStyle().Foreground(colorSubtle).Render("Start the server with: tunnel-server start\n")
-	s += "\n" + styleHelp.Render("Press 'q' to quit.")
-	return s
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(cWarning).
+		Padding(2, 4).
+		Width(60).
+		Align(lipgloss.Center)
+
+	icon := lipgloss.NewStyle().
+		Foreground(cWarning).
+		Bold(true).
+		Render("")
+	
+	title := lipgloss.NewStyle().
+		Foreground(cWarning).
+		Bold(true).
+		Render("Server Not Reachable")
+	
+	spinner := m.spinner.View()
+	
+	message := lipgloss.NewStyle().
+		Foreground(cSubtext).
+		Align(lipgloss.Center).
+		Render(fmt.Sprintf("Attempting to connect to %s...", m.httpAddr))
+	
+	help := lipgloss.NewStyle().
+		Foreground(cSubtext).
+		Italic(true).
+		Align(lipgloss.Center).
+		Render("Start the server with: tunnel-server start")
+	
+	quit := styleHelp.
+		Align(lipgloss.Center).
+		Render("Press 'q' to quit")
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		"",
+		icon+" "+title,
+		"",
+		spinner+" "+message,
+		"",
+		help,
+		"",
+		quit,
+	)
+
+	return box.Render(content)
 }
 
 func (m Model) renderTabs() string {
 	tabs := []string{}
-	for i := 0; i < 3; i++ {
-		var name string
-		switch ViewMode(i) {
-		case ViewDashboard:
-			name = "Dashboard"
-		case ViewConnections:
-			name = "Connections"
-		case ViewBlocklist:
-			name = "Blocklist"
-		}
-		
-		if ViewMode(i) == m.view {
-			tabs = append(tabs, styleTabActive.Render(name))
+	
+	tabData := []struct {
+		mode ViewMode
+		name string
+		icon string
+	}{
+		{ViewDashboard, "Dashboard", ""},
+		{ViewConnections, "Connections", " "},
+		{ViewBlocklist, "Blocklist", ""},
+	}
+	
+	for _, tab := range tabData {
+		label := tab.icon + " " + tab.name
+		if tab.mode == m.view {
+			tabs = append(tabs, styleTabActive.Render(label))
 		} else {
-			tabs = append(tabs, styleTabInactive.Render(name))
+			tabs = append(tabs, styleTabInactive.Render(label))
 		}
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	
+	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	
+	// Add a separator line under tabs
+	separator := lipgloss.NewStyle().
+		Foreground(cBorder).
+		Width(m.width - 10).
+		Render(strings.Repeat("─", m.width-10))
+	
+	return tabBar + "\n" + separator
 }
 
 func (m Model) renderDashboard() string {
-	contentWidth := m.width - 6
+	contentWidth := m.width - 10
 	
 	// Calculate dynamic box dimensions
 	var boxWidth, boxHeight int
@@ -715,85 +867,107 @@ func (m Model) renderDashboard() string {
 	
 	if contentWidth >= 120 {
 		numColumns = 4
-		boxWidth = (contentWidth - 3) / 4
+		boxWidth = (contentWidth - 9) / 4
 	} else if contentWidth >= 90 {
 		numColumns = 3
-		boxWidth = (contentWidth - 2) / 3
+		boxWidth = (contentWidth - 6) / 3
 	} else if contentWidth >= 60 {
 		numColumns = 2
-		boxWidth = (contentWidth - 1) / 2
+		boxWidth = (contentWidth - 3) / 2
 	} else {
 		numColumns = 1
 		boxWidth = contentWidth
 	}
 	
-	boxHeight = 8
+	boxHeight = 9
 	if m.height < 30 {
-		boxHeight = 6
+		boxHeight = 7
 	}
 
-	// Network Info Box
-	netContent := m.renderInfoRow("Public IP:", m.status.PublicIP)
-	netContent += m.renderInfoRow("Control Port:", fmt.Sprintf("%d", m.status.ControlPort))
-	netContent += m.renderInfoRow("Game Port:", fmt.Sprintf("%d", m.status.GamePort))
+	// Network Info Box with icon
+	netContent := m.renderInfoRow("Public IP", m.status.PublicIP)
+	netContent += m.renderInfoRow("Control", fmt.Sprintf(":%d", m.status.ControlPort))
+	netContent += m.renderInfoRow("Game (TCP)", fmt.Sprintf(":%d", m.status.GamePort))
 	if m.status.BedrockPort > 0 {
-		netContent += m.renderInfoRow("Bedrock Port:", fmt.Sprintf("%d", m.status.BedrockPort))
+		netContent += m.renderInfoRow("Bedrock (UDP)", fmt.Sprintf(":%d", m.status.BedrockPort))
 	}
-	netBox := m.renderDynamicBox("NETWORK", netContent, boxWidth, boxHeight, colorPrimary)
+	netBox := m.renderInfoBox("  NETWORK", netContent, boxWidth, boxHeight, cText)
 
-	// Tunnel Status Box
-	statusText := "Disconnected"
-	statusColor := colorError
-	statusIcon := "●"
+	// Tunnel Status Box with dynamic status badge
+	var statusBadge string
 	if m.status.TunnelConnected {
-		statusText = "Connected"
-		statusColor = colorSuccess
-		statusIcon = "●"
+		statusBadge = styleStatusBadge.
+			Foreground(cSuccess).
+			Background(cCard).
+			Render("  CONNECTED")
+	} else {
+		statusBadge = styleStatusBadge.
+			Foreground(cError).
+			Background(cCard).
+			Render("  OFFLINE")
 	}
-	tunContent := styleLabel.Render("Status:") + " " + 
-		lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(statusIcon+" "+statusText) + "\n"
-	tunContent += m.renderInfoRow("Remote:", m.status.TunnelRemoteAddr)
-	tunContent += m.renderInfoRow("Streams:", fmt.Sprintf("%d", m.status.NumStreams))
+	
+	tunContent := lipgloss.NewStyle().MarginBottom(1).Render(statusBadge)
+	tunContent += "\n" + m.renderInfoRow("Remote", m.status.TunnelRemoteAddr)
+	tunContent += m.renderInfoRow("Streams", fmt.Sprintf("%d active", m.status.NumStreams))
 	
 	uptime := time.Duration(m.status.UptimeSeconds) * time.Second
-	tunContent += m.renderInfoRow("Uptime:", uptime.String())
-	tunBox := m.renderDynamicBox("TUNNEL", tunContent, boxWidth, boxHeight, colorSuccess)
+	tunContent += m.renderInfoRow("Uptime", formatDuration(uptime))
+	tunBox := m.renderInfoBox("  TUNNEL", tunContent, boxWidth, boxHeight, cSuccess)
 
 	// Players Info Box
 	playerCount := len(m.status.PlayerList)
-	playContent := m.renderInfoRow("Active/Peak:", fmt.Sprintf("%d / %d", m.status.ActivePlayers, m.status.PeakPlayers))
+	peakBadge := lipgloss.NewStyle().
+		Foreground(cWarning).
+		Bold(true).
+		Render(fmt.Sprintf("%d", m.status.PeakPlayers))
+	
+	playContent := m.renderInfoRow("Active", fmt.Sprintf("%d", m.status.ActivePlayers))
+	playContent += m.renderInfoRow("Peak", peakBadge)
 	
 	if playerCount > 0 {
-		maxDisplay := boxHeight - 4
+		maxDisplay := boxHeight - 5
 		if maxDisplay < 1 {
 			maxDisplay = 1
 		}
 		
-		playContent += styleLabel.Render("Connected:") + "\n"
+		playContent += "\n" + lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Render("Online:")
+		playContent += "\n"
+		
 		for i, p := range m.status.PlayerList {
 			if i >= maxDisplay {
-				playContent += lipgloss.NewStyle().Foreground(colorSubtle).Render(
-					fmt.Sprintf("  +%d more...", playerCount-maxDisplay)) + "\n"
+				playContent += lipgloss.NewStyle().
+					Foreground(cSubtext).
+					Italic(true).
+					Render(fmt.Sprintf("  +%d more...", playerCount-maxDisplay)) + "\n"
 				break
 			}
-			playContent += lipgloss.NewStyle().Foreground(colorSecondary).Render(fmt.Sprintf("  %s", p)) + "\n"
+			playContent += lipgloss.NewStyle().
+				Foreground(cText).
+				Render("   "+p) + "\n"
 		}
 	} else {
-		playContent += "\n" + lipgloss.NewStyle().Foreground(colorSubtle).Italic(true).Render("No active players")
+		playContent += "\n" + lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Italic(true).
+			Align(lipgloss.Center).
+			Render("No active players")
 	}
-	playBox := m.renderDynamicBox("PLAYERS", playContent, boxWidth, boxHeight, colorWarning)
+	playBox := m.renderInfoBox("  PLAYERS", playContent, boxWidth, boxHeight, cText)
 
-	// Traffic Info Box
-	trafContent := m.renderInfoRow("Total:", formatBytes(m.status.BytesTransferred))
-	trafContent += m.renderInfoRow("In (Rx):", formatBytes(m.status.BytesFromPlayers))
-	trafContent += m.renderInfoRow("Out (Tx):", formatBytes(m.status.BytesFromTunnel))
+	// Traffic Info Box with better formatting
+	trafContent := m.renderInfoRow("Total", formatBytes(m.status.BytesTransferred))
+	trafContent += m.renderInfoRow("↓ Received", formatBytes(m.status.BytesFromPlayers))
+	trafContent += m.renderInfoRow("↑ Sent", formatBytes(m.status.BytesFromTunnel))
 	
-	// Calculate rate if possible (approximate)
+	// Calculate rate if possible
 	if m.status.UptimeSeconds > 0 {
 		ratePerSec := m.status.BytesTransferred / m.status.UptimeSeconds
-		trafContent += m.renderInfoRow("Avg Rate:", formatBytes(ratePerSec)+"/s")
+		trafContent += m.renderInfoRow("Avg Rate", formatBytes(ratePerSec)+"/s")
 	}
-	trafBox := m.renderDynamicBox("TRAFFIC", trafContent, boxWidth, boxHeight, colorPrimary)
+	trafBox := m.renderInfoBox("  TRAFFIC", trafContent, boxWidth, boxHeight, cText)
 
 	// Layout boxes based on number of columns
 	var layout string
@@ -813,112 +987,180 @@ func (m Model) renderDashboard() string {
 		layout = boxes[0] + "\n" + boxes[1] + "\n" + boxes[2] + "\n" + boxes[3]
 	}
 
-	// Logs viewport - dynamically sized
-	logViewportHeight := m.height - boxHeight*((4+numColumns-1)/numColumns) - 12
-	if logViewportHeight < 5 {
-		logViewportHeight = 5
-	}
-	
+	// Logs viewport - fixed small size for dashboard
 	logHeader := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(colorPrimary).
+		Foreground(cText).
+		Padding(0, 1).
 		MarginTop(1).
-		Render("LOGS")
+		MarginBottom(0).
+		Width(contentWidth).
+		Render(" ACTIVITY LOGS (Enter to expand)")
 	
 	logBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorSubtle).
+		BorderForeground(cBorder).
 		Padding(0, 1).
 		MarginTop(0).
 		Width(contentWidth).
-		Height(logViewportHeight).
+		Height(6). // Fixed height for dashboard view
 		Render(m.viewport.View())
 
 	return layout + "\n" + logHeader + "\n" + logBox
 }
 
+func (m Model) renderFullscreenLog() string {
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(cText).
+		Padding(0, 2).
+		Width(m.width - 10).
+		Render(" ACTIVITY LOGS (Esc to exit)")
+
+	return header + "\n" + m.viewport.View()
+}
+
 func (m Model) renderConnections() string {
-	s := lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Active Connections (%d)", len(m.connections))) + "\n\n"
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(cText).
+		Padding(0, 2).
+		MarginBottom(1).
+		Render(fmt.Sprintf("  Active Connections (%d)", len(m.connections)))
+	
+	var content string
 	if len(m.connections) == 0 {
-		s += lipgloss.NewStyle().Foreground(colorSubtle).Render("No active connections.")
+		content = lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Italic(true).
+			Padding(2, 0).
+			Render("No active connections.")
 	} else {
-		s += m.connTable.View()
+		content = m.connTable.View()
 	}
-	return s
+	return header + "\n" + content
 }
 
 func (m Model) renderBlocklist() string {
-	s := lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Blocked IPs (%d)", len(m.blocked))) + "\n\n"
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(cText).
+		Padding(0, 2).
+		MarginBottom(1).
+		Render(fmt.Sprintf("  Blocked IPs (%d)", len(m.blocked)))
+	
+	var content string
 	if len(m.blocked) == 0 {
-		s += lipgloss.NewStyle().Foreground(colorSubtle).Render("No blocked IPs.")
+		content = lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Italic(true).
+			Padding(2, 0).
+			Render("No blocked IPs.")
 	} else {
-		s += m.blockTable.View()
+		content = m.blockTable.View()
 	}
-	return s
+	return header + "\n" + content
 }
 
 func (m Model) renderHelpBar() string {
 	if m.showHelp {
-		return m.help.View(m.keys)
+		return lipgloss.NewStyle().
+			Foreground(cSubtext).
+			Padding(1, 2).
+			MarginTop(1).
+			Render(m.help.View(m.keys))
 	}
+
+	var helpText string
+	keyStyle := lipgloss.NewStyle().
+		Foreground(cText).
+		Bold(true)
+	
+	divider := lipgloss.NewStyle().
+		Foreground(cSubtext).
+		Render(" • ")
 
 	switch m.view {
 	case ViewDashboard:
-		return styleHelp.Render("Tab: Switch | ?: Help | q: Quit | ↑/↓: Scroll")
+		helpText = keyStyle.Render("Tab") + " Switch View" + divider +
+			keyStyle.Render("↑/↓") + " Scroll" + divider +
+			keyStyle.Render("?") + " Help" + divider +
+			keyStyle.Render("q") + " Quit"
 	case ViewConnections:
-		return styleHelp.Render("Tab: Switch | ?: Help | q: Quit | x: Disconnect | b: Block | n: Nickname")
+		helpText = keyStyle.Render("Tab") + " Switch View" + divider +
+			keyStyle.Render("x") + " Disconnect" + divider +
+			keyStyle.Render("b") + " Block" + divider +
+			keyStyle.Render("n") + " Nickname" + divider +
+			keyStyle.Render("?") + " Help" + divider +
+			keyStyle.Render("q") + " Quit"
 	case ViewBlocklist:
-		return styleHelp.Render("Tab: Switch | ?: Help | q: Quit | u/x: Unblock")
+		helpText = keyStyle.Render("Tab") + " Switch View" + divider +
+			keyStyle.Render("u/x") + " Unblock" + divider +
+			keyStyle.Render("?") + " Help" + divider +
+			keyStyle.Render("q") + " Quit"
 	}
-	return ""
+	
+	return lipgloss.NewStyle().
+		Foreground(cSubtext).
+		Padding(0, 2).
+		MarginTop(1).
+		Width(m.width - 10).
+		Render(helpText)
 }
 
 func (m Model) renderInputOverlay() string {
-	content := lipgloss.NewStyle().Bold(true).Render("Set Nickname for "+m.inputTarget) + "\n\n"
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(cText).
+		Render("Set Nickname")
+	
+	subtitle := lipgloss.NewStyle().
+		Foreground(cSubtext).
+		Render("for " + m.inputTarget)
+	
+	content := title + "\n" + subtitle + "\n\n"
 	content += m.textInput.View() + "\n\n"
-	content += lipgloss.NewStyle().Foreground(colorSubtle).Render("Enter: Save | Esc: Cancel")
+	
+	helpKeys := lipgloss.NewStyle().
+		Foreground(cSubtext).
+		Render(
+			lipgloss.NewStyle().Foreground(cText).Render("Enter") + " Save • " +
+				lipgloss.NewStyle().Foreground(cText).Render("Esc") + " Cancel",
+		)
+	content += helpKeys
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorPrimary).
-		Padding(1).
-		Width(40).
+		BorderForeground(cBorder).
+		Padding(2, 3).
+		Width(50).
 		Render(content)
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(m.width-10, m.height-6, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m Model) renderInfoRow(label, value string) string {
-	return fmt.Sprintf("%s %s\n", 
-		lipgloss.NewStyle().Foreground(colorSubtle).Width(12).Render(label), 
+	return fmt.Sprintf("%s %s\n",
+		styleLabel.Render(label+":"),
 		styleValue.Render(value))
 }
 
-func (m Model) renderBox(content string, width, height int) string {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorSubtle).
-		Padding(0, 1).
-		MarginRight(1).
-		Width(width).
-		Height(height).
-		Render(content)
-}
-
-func (m Model) renderDynamicBox(title, content string, width, height int, accentColor lipgloss.Color) string {
-	titleStyle := lipgloss.NewStyle().
+func (m Model) renderInfoBox(title, content string, width, height int, accentColor lipgloss.Color) string {
+	titleBar := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(accentColor).
-		Width(width - 4)
+		Padding(0, 0).
+		Width(width - 4).
+		Render(title)
 	
-	boxContent := titleStyle.Render(title) + "\n" + content
+	boxContent := titleBar + "\n" + content
 	
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(accentColor).
-		Padding(0, 1).
-		MarginRight(1).
-		Width(width).
+		BorderForeground(cBorder).
+		Padding(1, 2).
+		MarginRight(2).
+		Width(width - 6).
 		Height(height).
 		Render(boxContent)
 }
@@ -928,16 +1170,17 @@ func (m Model) renderDynamicBox(title, content string, width, height int, accent
 // ============================================================================
 
 func (m *Model) updateLayout() {
-	contentWidth := m.width - 6
+	contentWidth := m.width - 10
 	contentHeight := m.height - 8
 
 	// Viewport
-	viewportHeight := contentHeight - 20
-	if viewportHeight < 5 {
-		viewportHeight = 5
+	if m.logFullscreen {
+		m.viewport.Width = m.width - 10
+		m.viewport.Height = m.height - 2 // Minus header
+	} else {
+		m.viewport.Width = contentWidth
+		m.viewport.Height = 6 // Fixed height for dashboard
 	}
-	m.viewport.Width = contentWidth
-	m.viewport.Height = viewportHeight
 
 	// Tables
 	tableHeight := contentHeight - 5
@@ -952,7 +1195,7 @@ func (m *Model) updateLayout() {
 }
 
 func (m *Model) updateTableColumns() {
-	w := m.width - 6
+	w := m.width - 10
 
 	// Connections table
 	connCols := []table.Column{
@@ -960,8 +1203,8 @@ func (m *Model) updateTableColumns() {
 		{Title: "Nickname", Width: w * 15 / 100},
 		{Title: "Type", Width: w * 10 / 100},
 		{Title: "Connected", Width: w * 20 / 100},
-		{Title: "Rx", Width: w * 15 / 100},
-		{Title: "Tx", Width: w * 15 / 100},
+		{Title: "↓ Rx", Width: w * 15 / 100},
+		{Title: "↑ Tx", Width: w * 15 / 100},
 	}
 	m.connTable.SetColumns(connCols)
 
@@ -978,12 +1221,22 @@ func (m *Model) updateConnectionsTable() {
 	for _, conn := range m.connections {
 		nickname := conn.Nickname
 		if nickname == "" {
-			nickname = "-"
+			nickname = lipgloss.NewStyle().Foreground(cSubtext).Italic(true).Render("(unnamed)")
+		} else {
+			nickname = lipgloss.NewStyle().Foreground(cText).Render(nickname)
 		}
+		
+		connType := strings.ToUpper(conn.Type)
+		if connType == "TCP" {
+			connType = lipgloss.NewStyle().Foreground(cText).Render(" TCP")
+		} else if connType == "UDP" {
+			connType = lipgloss.NewStyle().Foreground(cWarning).Render(" UDP")
+		}
+		
 		rows = append(rows, table.Row{
 			conn.IP,
 			nickname,
-			strings.ToUpper(conn.Type),
+			connType,
 			conn.ConnectedAt.Format(time.Kitchen),
 			formatBytes(conn.BytesIn),
 			formatBytes(conn.BytesOut),
@@ -1006,7 +1259,18 @@ func (m *Model) updateBlocklistTable() {
 func (m *Model) updateLogViewport() {
 	var content string
 	for _, l := range m.logs {
-		content += lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0")).Render(l) + "\n"
+		// Color-code log levels
+		logLine := l
+		if strings.Contains(l, "ERROR") || strings.Contains(l, "error") {
+			logLine = lipgloss.NewStyle().Foreground(cError).Render(l)
+		} else if strings.Contains(l, "WARN") || strings.Contains(l, "warn") {
+			logLine = lipgloss.NewStyle().Foreground(cWarning).Render(l)
+		} else if strings.Contains(l, "INFO") || strings.Contains(l, "info") {
+			logLine = lipgloss.NewStyle().Foreground(cText).Render(l)
+		} else {
+			logLine = lipgloss.NewStyle().Foreground(cSubtext).Render(l)
+		}
+		content += logLine + "\n"
 	}
 	m.viewport.SetContent(content)
 	if m.view == ViewDashboard {
@@ -1049,4 +1313,19 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	return fmt.Sprintf("%dd %dh", days, hours)
 }

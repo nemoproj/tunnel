@@ -14,6 +14,12 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 65535)
+	},
+}
+
 const nicknamesFile = "nicknames.json"
 
 type Config struct {
@@ -156,6 +162,13 @@ func (r *Relay) startControlServer() {
 
 		config := yamux.DefaultConfig()
 		config.KeepAliveInterval = 10 * time.Second
+		config.MaxStreamWindowSize = 1024 * 1024 // 1MB
+
+		// Enable TCP Keepalives
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		}
 
 		session, err := yamux.Server(conn, config)
 		if err != nil {
@@ -203,7 +216,7 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	session := r.tunnelSession
 	r.tunnelMutex.Unlock()
 
-	if session == nil {
+	if session == nil || session.IsClosed() {
 		return
 	}
 
@@ -249,7 +262,10 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 
 	stream, err := session.Open()
 	if err != nil {
-		r.Log(fmt.Sprintf("[Game] Failed to open stream: %v", err))
+		// Only log non-shutdown errors to avoid spam
+		if err != yamux.ErrSessionShutdown {
+			r.Log(fmt.Sprintf("[Game] Failed to open stream: %v", err))
+		}
 		return
 	}
 	defer stream.Close()
@@ -333,19 +349,25 @@ func (r *Relay) startBedrockServer() {
 
 	r.Log(fmt.Sprintf("[Bedrock] Listening on :%d (UDP)", r.Config.BedrockPort))
 
-	buffer := make([]byte, 65535) // Max UDP packet size
-
 	for {
-		n, remoteAddr, err := conn.ReadFromUDP(buffer)
+		buf := bufferPool.Get().([]byte)
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			bufferPool.Put(buf)
 			r.Log(fmt.Sprintf("[Bedrock] Read error: %v", err))
 			continue
 		}
 
 		key := remoteAddr.String()
-		data := make([]byte, n)
-		copy(data, buffer[:n])
-
+		
+		// We need to copy the data because we're passing it to a channel/stream
+		// and we want to return the buffer to the pool.
+		// Wait, sendToTunnel writes to stream immediately.
+		// But we need to be sure.
+		// Let's look at sendToTunnel. It calls s.stream.Write(data).
+		// Write should copy. So we can reuse the buffer after sendToTunnel returns?
+		// sendToTunnel is synchronous.
+		
 		r.playersMutex.Lock()
 		session, exists := r.UDPSessions[key]
 		if !exists {
@@ -353,6 +375,7 @@ func (r *Relay) startBedrockServer() {
 			session = r.createBedrockSession(conn, remoteAddr)
 			if session == nil {
 				r.playersMutex.Unlock()
+				bufferPool.Put(buf)
 				continue
 			}
 			r.UDPSessions[key] = session
@@ -360,7 +383,8 @@ func (r *Relay) startBedrockServer() {
 		r.playersMutex.Unlock()
 
 		// Forward packet to tunnel
-		session.sendToTunnel(data)
+		session.sendToTunnel(buf[:n])
+		bufferPool.Put(buf)
 	}
 }
 
@@ -378,7 +402,7 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 	tunnelSession := r.tunnelSession
 	r.tunnelMutex.Unlock()
 
-	if tunnelSession == nil {
+	if tunnelSession == nil || tunnelSession.IsClosed() {
 		return nil
 	}
 
@@ -415,7 +439,10 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 
 	stream, err := tunnelSession.Open()
 	if err != nil {
-		r.Log(fmt.Sprintf("[Bedrock] Failed to open stream: %v", err))
+		// Only log non-shutdown errors to avoid spam
+		if err != yamux.ErrSessionShutdown {
+			r.Log(fmt.Sprintf("[Bedrock] Failed to open stream: %v", err))
+		}
 		atomic.AddInt64(&r.ActivePlayers, -1)
 		return nil
 	}
@@ -486,9 +513,10 @@ func (s *bedrockSession) readFromTunnel() {
 		}
 
 		// Read packet data
-		data := make([]byte, pktLen)
-		_, err = io.ReadFull(s.stream, data)
+		buf := bufferPool.Get().([]byte)
+		_, err = io.ReadFull(s.stream, buf[:pktLen])
 		if err != nil {
+			bufferPool.Put(buf)
 			return
 		}
 
@@ -497,7 +525,8 @@ func (s *bedrockSession) readFromTunnel() {
 		atomic.AddInt64(&s.stats.BytesOut, n)
 
 		// Send back to UDP client
-		s.udpConn.WriteToUDP(data, s.remoteAddr)
+		s.udpConn.WriteToUDP(buf[:pktLen], s.remoteAddr)
+		bufferPool.Put(buf)
 	}
 }
 
