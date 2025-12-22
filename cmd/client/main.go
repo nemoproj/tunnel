@@ -386,7 +386,7 @@ func runHost(serverAddr, localAddr, bedrockAddr string, p *tea.Program) {
 
 	config := yamux.DefaultConfig()
 	config.KeepAliveInterval = 10 * time.Second
-	config.MaxStreamWindowSize = 1024 * 1024 // 1MB
+	config.MaxStreamWindowSize = 4 * 1024 * 1024 // 4MB for better throughput on high-latency links
 	config.LogOutput = w
 
 	session, err := yamux.Client(conn, config)
@@ -459,22 +459,34 @@ func handleStream(stream net.Conn, localAddr, bedrockAddr string, p *tea.Program
 	}
 	defer localConn.Close()
 
+	// Enable TCP NoDelay for low latency on local connection
+	if tcpConn, ok := localConn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
 	// Bidirectional copy
-	done := make(chan struct{})
+	done := make(chan struct{}, 2)
 
 	// Stream -> Local
 	// IMPORTANT: Use bufReader here because it may have buffered some of the player's initial data
 	go func() {
-		io.Copy(localConn, bufReader)
+		buf := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buf)
+		io.CopyBuffer(localConn, bufReader, buf)
+		localConn.Close() // Signal EOF to other direction
 		done <- struct{}{}
 	}()
 
 	// Local -> Stream
 	go func() {
-		io.Copy(stream, localConn)
+		buf := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buf)
+		io.CopyBuffer(stream, localConn, buf)
+		stream.Close() // Signal EOF to other direction
 		done <- struct{}{}
 	}()
 
+	<-done
 	<-done
 	p.Send(logMsg(fmt.Sprintf("[TCP] Player disconnected: %s", playerIP)))
 }
@@ -536,18 +548,23 @@ func handleUDPStream(stream net.Conn, bufReader *bufio.Reader, bedrockAddr strin
 		
 		for {
 			localConn.SetReadDeadline(time.Now().Add(30 * time.Second))
-			n, err := localConn.Read(buffer)
+			// Read into buffer[2:] to reserve space for length prefix
+			n, err := localConn.Read(buffer[2:])
 			if err != nil {
 				return
 			}
 
 			// Write length prefix
-			lenBuf := make([]byte, 2)
-			lenBuf[0] = byte(n >> 8)
-			lenBuf[1] = byte(n & 0xFF)
+			buffer[0] = byte(n >> 8)
+			buffer[1] = byte(n & 0xFF)
 
-			stream.Write(lenBuf)
-			stream.Write(buffer[:n])
+			// Set write deadline to avoid blocking on stalled stream
+			stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_, err = stream.Write(buffer[:n+2])
+			stream.SetWriteDeadline(time.Time{})
+			if err != nil {
+				return
+			}
 		}
 	}()
 

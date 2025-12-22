@@ -162,12 +162,13 @@ func (r *Relay) startControlServer() {
 
 		config := yamux.DefaultConfig()
 		config.KeepAliveInterval = 10 * time.Second
-		config.MaxStreamWindowSize = 1024 * 1024 // 1MB
+		config.MaxStreamWindowSize = 4 * 1024 * 1024 // 4MB for better throughput on high-latency links
 
-		// Enable TCP Keepalives
+		// Enable TCP Keepalives and NoDelay
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
 			tcpConn.SetKeepAlive(true)
 			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+			tcpConn.SetNoDelay(true)
 		}
 
 		session, err := yamux.Server(conn, config)
@@ -203,6 +204,11 @@ func (r *Relay) startGameServer() {
 		if err != nil {
 			r.Log(fmt.Sprintf("[Game] Accept error: %v", err))
 			continue
+		}
+
+		// Enable TCP NoDelay for low latency
+		if tcpConn, ok := playerConn.(*net.TCPConn); ok {
+			tcpConn.SetNoDelay(true)
 		}
 
 		go r.handlePlayer(playerConn)
@@ -278,20 +284,27 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	}
 
 	// Bidirectional copy with traffic counting
-	done := make(chan struct{})
+	done := make(chan struct{}, 2)
 
 	go func() {
 		// Stream -> Player (BytesOut)
-		io.Copy(playerConn, &CountingReader{r: stream, counters: []*int64{&r.BytesFromTunnel, &stats.BytesOut}})
+		buf := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buf)
+		io.CopyBuffer(playerConn, &CountingReader{r: stream, counters: []*int64{&r.BytesFromTunnel, &stats.BytesOut}}, buf)
+		playerConn.Close() // Signal EOF to other direction
 		done <- struct{}{}
 	}()
 
 	go func() {
 		// Player -> Stream (BytesIn)
-		io.Copy(stream, &CountingReader{r: playerConn, counters: []*int64{&r.BytesFromPlayers, &stats.BytesIn}})
+		buf := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buf)
+		io.CopyBuffer(stream, &CountingReader{r: playerConn, counters: []*int64{&r.BytesFromPlayers, &stats.BytesIn}}, buf)
+		stream.Close() // Signal EOF to other direction
 		done <- struct{}{}
 	}()
 
+	<-done
 	<-done
 	r.Log(fmt.Sprintf("[Game] Player disconnected: %s", playerConn.RemoteAddr()))
 }
@@ -351,7 +364,8 @@ func (r *Relay) startBedrockServer() {
 
 	for {
 		buf := bufferPool.Get().([]byte)
-		n, remoteAddr, err := conn.ReadFromUDP(buf)
+		// Read into buf[2:] to reserve space for length prefix
+		n, remoteAddr, err := conn.ReadFromUDP(buf[2:])
 		if err != nil {
 			bufferPool.Put(buf)
 			r.Log(fmt.Sprintf("[Bedrock] Read error: %v", err))
@@ -382,8 +396,12 @@ func (r *Relay) startBedrockServer() {
 		}
 		r.playersMutex.Unlock()
 
+		// Prepend length prefix
+		buf[0] = byte(n >> 8)
+		buf[1] = byte(n & 0xFF)
+
 		// Forward packet to tunnel
-		session.sendToTunnel(buf[:n])
+		session.sendToTunnel(buf[:n+2])
 		bufferPool.Put(buf)
 	}
 }
@@ -472,13 +490,15 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 
 func (s *bedrockSession) sendToTunnel(data []byte) {
 	// Write length-prefixed packet to stream
-	lenBuf := make([]byte, 2)
-	lenBuf[0] = byte(len(data) >> 8)
-	lenBuf[1] = byte(len(data) & 0xFF)
-
-	s.stream.Write(lenBuf)
-	s.stream.Write(data)
-	n := int64(len(data) + 2)
+	// data already includes the 2-byte length prefix
+	// Set write deadline to avoid blocking on stalled stream
+	s.stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := s.stream.Write(data)
+	s.stream.SetWriteDeadline(time.Time{})
+	if err != nil {
+		return
+	}
+	n := int64(len(data))
 	atomic.AddInt64(&s.relay.BytesFromPlayers, n)
 	atomic.AddInt64(&s.stats.BytesIn, n)
 }
