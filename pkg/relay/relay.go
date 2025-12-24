@@ -160,6 +160,22 @@ func (r *Relay) startControlServer() {
 
 		r.Log(fmt.Sprintf("[Control] Connection from %s", conn.RemoteAddr()))
 
+		// Check magic header to prevent unauthorized connections (e.g. scanners) from overwriting the session
+		magic := make([]byte, 4)
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.ReadFull(conn, magic)
+		conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			r.Log(fmt.Sprintf("[Control] Failed to read magic header from %s: %v", conn.RemoteAddr(), err))
+			conn.Close()
+			continue
+		}
+		if string(magic) != "TUN\n" {
+			r.Log(fmt.Sprintf("[Control] Invalid magic header from %s: %q", conn.RemoteAddr(), magic))
+			conn.Close()
+			continue
+		}
+
 		config := yamux.DefaultConfig()
 		config.KeepAliveInterval = 10 * time.Second
 		config.MaxStreamWindowSize = 4 * 1024 * 1024 // 4MB for better throughput on high-latency links

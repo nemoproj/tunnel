@@ -372,6 +372,13 @@ func runHost(serverAddr, localAddr, bedrockAddr string, p *tea.Program) {
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
 
+	// Send magic header
+	if _, err := conn.Write([]byte("TUN\n")); err != nil {
+		p.Send(errorMsg(fmt.Errorf("failed to send magic header: %v", err)))
+		conn.Close()
+		return
+	}
+
 	// 2. Setup Yamux Client
 	// Capture yamux logs to the UI
 	r, w := io.Pipe()
