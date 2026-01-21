@@ -5,34 +5,49 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
 
 type StatusResponse struct {
-	PublicIP         string `json:"public_ip"`
-	ControlPort      int    `json:"control_port"`
-	GamePort         int    `json:"game_port"`
-	BedrockPort      int    `json:"bedrock_port,omitempty"`
+	PublicIP         string   `json:"public_ip"`
+	ControlPort      int      `json:"control_port"`
+	GamePort         int      `json:"game_port"`
+	BedrockPort      int      `json:"bedrock_port,omitempty"`
 	ActivePlayers    int64    `json:"active_players"`
 	PeakPlayers      int64    `json:"peak_players"`
 	PlayerList       []string `json:"player_list"`
 	BytesTransferred int64    `json:"bytes_transferred"`
-	BytesFromPlayers int64  `json:"bytes_from_players"`
-	BytesFromTunnel  int64  `json:"bytes_from_tunnel"`
-	TunnelConnected  bool   `json:"tunnel_connected"`
-	TunnelRemoteAddr string `json:"tunnel_remote_addr"`
-	NumStreams       int    `json:"num_streams"`
-	UptimeSeconds    int64  `json:"uptime_seconds"`
+	BytesFromPlayers int64    `json:"bytes_from_players"`
+	BytesFromTunnel  int64    `json:"bytes_from_tunnel"`
+	TunnelConnected  bool     `json:"tunnel_connected"`
+	TunnelRemoteAddr string   `json:"tunnel_remote_addr"`
+	NumStreams       int      `json:"num_streams"`
+	UptimeSeconds    int64    `json:"uptime_seconds"`
 }
 
 func (r *Relay) StartAPI(port int) {
+	// Enable block and mutex profiling for deeper analysis
+	// Block profile: tracks time goroutines spend blocked on sync primitives
+	// Mutex profile: tracks contention on mutexes
+	runtime.SetBlockProfileRate(1)
+	runtime.SetMutexProfileFraction(1)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", r.handleStatus)
 	mux.HandleFunc("/logs", r.handleLogs)
 	mux.HandleFunc("/connections", r.handleConnections)
 	mux.HandleFunc("/blocklist", r.handleBlocklist)
 	mux.HandleFunc("/nicknames", r.handleNicknames)
+
+	// Register pprof handlers for profiling
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -153,7 +168,7 @@ func (r *Relay) handleConnections(w http.ResponseWriter, req *http.Request) {
 			connType := "unknown"
 			hasTCP := false
 			hasUDP := false
-			
+
 			if _, ok := r.TCPConns[ip]; ok {
 				connType = "tcp"
 				hasTCP = true
@@ -161,12 +176,12 @@ func (r *Relay) handleConnections(w http.ResponseWriter, req *http.Request) {
 				connType = "udp"
 				hasUDP = true
 			}
-			
+
 			// Skip connections without streams (crawlers/HTTP clients)
 			if !hasTCP && !hasUDP {
 				continue
 			}
-			
+
 			var bytesIn, bytesOut int64
 			if stats, ok := r.PlayerStats[ip]; ok {
 				bytesIn = atomic.LoadInt64(&stats.BytesIn)
@@ -222,7 +237,7 @@ func (r *Relay) handleBlocklist(w http.ResponseWriter, req *http.Request) {
 		// But Disconnect takes the full address key.
 		// We need to iterate connections to find matches.
 		r.disconnectByIP(ip)
-		
+
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "Blocked %s", ip)
 		return
