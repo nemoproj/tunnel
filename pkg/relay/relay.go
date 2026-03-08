@@ -32,16 +32,16 @@ type Relay struct {
 	Config Config
 
 	// State
-	tunnelSession *yamux.Session
-	tunnelMutex   sync.Mutex
-	GlobalBytes   int64 // Deprecated: use BytesFromPlayers + BytesFromTunnel
+	tunnelSession    *yamux.Session
+	tunnelMutex      sync.Mutex
+	GlobalBytes      int64 // Deprecated: use BytesFromPlayers + BytesFromTunnel
 	BytesFromPlayers int64
 	BytesFromTunnel  int64
-	ActivePlayers int64
-	PeakPlayers   int64
-	PublicIP      string
+	ActivePlayers    int64
+	PeakPlayers      int64
+	PublicIP         string
 	TunnelRemoteAddr string
-	StartTime     time.Time
+	StartTime        time.Time
 
 	// Players
 	playersMutex sync.Mutex
@@ -63,17 +63,17 @@ type PlayerStats struct {
 
 func New(cfg Config) *Relay {
 	r := &Relay{
-		Config:         cfg,
-		logBroadcaster: NewLogBroadcaster(),
-		PublicIP:       "Fetching...",
+		Config:           cfg,
+		logBroadcaster:   NewLogBroadcaster(),
+		PublicIP:         "Fetching...",
 		TunnelRemoteAddr: "None",
-		StartTime:      time.Now(),
-		PlayerIPs:      make(map[string]time.Time),
-		TCPConns:       make(map[string]net.Conn),
-		UDPSessions:    make(map[string]*bedrockSession),
-		PlayerStats:    make(map[string]*PlayerStats),
-		BlockedIPs:     make(map[string]time.Time),
-		Nicknames:      make(map[string]string),
+		StartTime:        time.Now(),
+		PlayerIPs:        make(map[string]time.Time),
+		TCPConns:         make(map[string]net.Conn),
+		UDPSessions:      make(map[string]*bedrockSession),
+		PlayerStats:      make(map[string]*PlayerStats),
+		BlockedIPs:       make(map[string]time.Time),
+		Nicknames:        make(map[string]string),
 	}
 	r.loadNicknames()
 	return r
@@ -103,7 +103,7 @@ func (r *Relay) saveNicknames() {
 func (r *Relay) SetNickname(ip, name string) {
 	r.playersMutex.Lock()
 	defer r.playersMutex.Unlock()
-	
+
 	if name == "" {
 		delete(r.Nicknames, ip)
 	} else {
@@ -252,7 +252,7 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	r.playersMutex.Unlock()
 
 	r.Log(fmt.Sprintf("[Game] Player connected: %s", playerConn.RemoteAddr()))
-	
+
 	stats := &PlayerStats{}
 	r.playersMutex.Lock()
 	r.PlayerIPs[playerConn.RemoteAddr().String()] = time.Now()
@@ -261,7 +261,7 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 	r.playersMutex.Unlock()
 
 	newActive := atomic.AddInt64(&r.ActivePlayers, 1)
-	
+
 	// Update peak players
 	for {
 		peak := atomic.LoadInt64(&r.PeakPlayers)
@@ -360,7 +360,6 @@ func (r *Relay) Unblock(ip string) {
 	r.Log(fmt.Sprintf("Unblocked IP: %s", ip))
 }
 
-
 // startBedrockServer starts the UDP listener for Bedrock Edition players (Geyser)
 func (r *Relay) startBedrockServer() {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", r.Config.BedrockPort))
@@ -389,7 +388,7 @@ func (r *Relay) startBedrockServer() {
 		}
 
 		key := remoteAddr.String()
-		
+
 		// We need to copy the data because we're passing it to a channel/stream
 		// and we want to return the buffer to the pool.
 		// Wait, sendToTunnel writes to stream immediately.
@@ -397,7 +396,7 @@ func (r *Relay) startBedrockServer() {
 		// Let's look at sendToTunnel. It calls s.stream.Write(data).
 		// Write should copy. So we can reuse the buffer after sendToTunnel returns?
 		// sendToTunnel is synchronous.
-		
+
 		r.playersMutex.Lock()
 		session, exists := r.UDPSessions[key]
 		if !exists {
@@ -450,11 +449,11 @@ func (r *Relay) createBedrockSession(udpConn *net.UDPConn, remoteAddr *net.UDPAd
 	}
 
 	r.Log(fmt.Sprintf("[Bedrock] Player connected: %s", remoteAddr.String()))
-	
+
 	// Note: Caller holds playersMutex when calling this.
 	// We are just updating PlayerIPs which is protected by playersMutex.
 	r.PlayerIPs[remoteAddr.String()] = time.Now()
-	
+
 	stats := &PlayerStats{}
 	r.PlayerStats[remoteAddr.String()] = stats
 
@@ -523,7 +522,7 @@ func (s *bedrockSession) readFromTunnel() {
 	defer func() {
 		s.stream.Close()
 		atomic.AddInt64(&s.relay.ActivePlayers, -1)
-		
+
 		s.relay.playersMutex.Lock()
 		delete(s.relay.PlayerIPs, s.remoteAddr.String())
 		delete(s.relay.UDPSessions, s.remoteAddr.String())
@@ -576,7 +575,9 @@ func (c *CountingReader) Read(p []byte) (n int, err error) {
 	n, err = c.r.Read(p)
 	if n > 0 {
 		for _, counter := range c.counters {
-			atomic.AddInt64(counter, int64(n))
+			if counter != nil {
+				atomic.AddInt64(counter, int64(n))
+			}
 		}
 	}
 	return
