@@ -96,7 +96,7 @@ func BenchmarkCountingReaderRead(b *testing.B) {
 				b.Fatalf("Read() error = %v", err)
 			}
 		}
-		benchmarkCounterSink = atomic.LoadInt64(&counter1) + atomic.LoadInt64(&counter2)
+		benchmarkCounterSink = counter1 + counter2
 	})
 
 	b.Run("direct_fields_candidate", func(b *testing.B) {
@@ -114,7 +114,7 @@ func BenchmarkCountingReaderRead(b *testing.B) {
 				b.Fatalf("Read() error = %v", err)
 			}
 		}
-		benchmarkCounterSink = atomic.LoadInt64(&counter1) + atomic.LoadInt64(&counter2)
+		benchmarkCounterSink = counter1 + counter2
 	})
 }
 

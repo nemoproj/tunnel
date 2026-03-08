@@ -575,7 +575,9 @@ func (c *CountingReader) Read(p []byte) (n int, err error) {
 	n, err = c.r.Read(p)
 	if n > 0 {
 		for _, counter := range c.counters {
-			atomic.AddInt64(counter, int64(n))
+			if counter != nil {
+				atomic.AddInt64(counter, int64(n))
+			}
 		}
 	}
 	return
