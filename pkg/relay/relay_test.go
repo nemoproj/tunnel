@@ -7,13 +7,14 @@ import (
 	"testing"
 )
 
+var benchmarkCounterSink int64
+
 func TestCountingReaderUpdatesCounters(t *testing.T) {
 	var counter1, counter2 int64
 
 	reader := &CountingReader{
 		r:        strings.NewReader("hello"),
-		counter1: &counter1,
-		counter2: &counter2,
+		counters: []*int64{&counter1, &counter2},
 	}
 
 	buf := make([]byte, 8)
@@ -37,7 +38,7 @@ func TestCountingReaderSupportsNilCounter(t *testing.T) {
 
 	reader := &CountingReader{
 		r:        strings.NewReader("go"),
-		counter1: &counter,
+		counters: []*int64{&counter},
 	}
 
 	buf := make([]byte, 8)
@@ -62,4 +63,77 @@ func TestCountingReaderSupportsNilCounter(t *testing.T) {
 	if got := atomic.LoadInt64(&counter); got != 2 {
 		t.Fatalf("counter after EOF = %d, want 2", got)
 	}
+}
+
+type fixedReadSizer struct {
+	n int
+}
+
+func (r fixedReadSizer) Read(p []byte) (int, error) {
+	if len(p) < r.n {
+		return len(p), nil
+	}
+	return r.n, nil
+}
+
+func BenchmarkCountingReaderRead(b *testing.B) {
+	const readSize = 4096
+
+	buf := make([]byte, readSize)
+	reader := fixedReadSizer{n: readSize}
+
+	b.Run("current_slice", func(b *testing.B) {
+		var counter1, counter2 int64
+		cr := &CountingReader{
+			r:        reader,
+			counters: []*int64{&counter1, &counter2},
+		}
+
+		b.ReportAllocs()
+		b.SetBytes(readSize)
+		for i := 0; i < b.N; i++ {
+			if _, err := cr.Read(buf); err != nil {
+				b.Fatalf("Read() error = %v", err)
+			}
+		}
+		benchmarkCounterSink = atomic.LoadInt64(&counter1) + atomic.LoadInt64(&counter2)
+	})
+
+	b.Run("direct_fields_candidate", func(b *testing.B) {
+		var counter1, counter2 int64
+		cr := &directCountingReader{
+			r:        reader,
+			counter1: &counter1,
+			counter2: &counter2,
+		}
+
+		b.ReportAllocs()
+		b.SetBytes(readSize)
+		for i := 0; i < b.N; i++ {
+			if _, err := cr.Read(buf); err != nil {
+				b.Fatalf("Read() error = %v", err)
+			}
+		}
+		benchmarkCounterSink = atomic.LoadInt64(&counter1) + atomic.LoadInt64(&counter2)
+	})
+}
+
+type directCountingReader struct {
+	r        io.Reader
+	counter1 *int64
+	counter2 *int64
+}
+
+func (c *directCountingReader) Read(p []byte) (n int, err error) {
+	n, err = c.r.Read(p)
+	if n > 0 {
+		delta := int64(n)
+		if c.counter1 != nil {
+			atomic.AddInt64(c.counter1, delta)
+		}
+		if c.counter2 != nil {
+			atomic.AddInt64(c.counter2, delta)
+		}
+	}
+	return
 }

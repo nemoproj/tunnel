@@ -306,7 +306,7 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 		// Stream -> Player (BytesOut)
 		buf := bufferPool.Get().([]byte)
 		defer bufferPool.Put(buf)
-		io.CopyBuffer(playerConn, &CountingReader{r: stream, counter1: &r.BytesFromTunnel, counter2: &stats.BytesOut}, buf)
+		io.CopyBuffer(playerConn, &CountingReader{r: stream, counters: []*int64{&r.BytesFromTunnel, &stats.BytesOut}}, buf)
 		playerConn.Close() // Signal EOF to other direction
 		done <- struct{}{}
 	}()
@@ -315,7 +315,7 @@ func (r *Relay) handlePlayer(playerConn net.Conn) {
 		// Player -> Stream (BytesIn)
 		buf := bufferPool.Get().([]byte)
 		defer bufferPool.Put(buf)
-		io.CopyBuffer(stream, &CountingReader{r: playerConn, counter1: &r.BytesFromPlayers, counter2: &stats.BytesIn}, buf)
+		io.CopyBuffer(stream, &CountingReader{r: playerConn, counters: []*int64{&r.BytesFromPlayers, &stats.BytesIn}}, buf)
 		stream.Close() // Signal EOF to other direction
 		done <- struct{}{}
 	}()
@@ -568,19 +568,14 @@ func (s *bedrockSession) readFromTunnel() {
 // CountingReader wraps an io.Reader and counts bytes read
 type CountingReader struct {
 	r        io.Reader
-	counter1 *int64
-	counter2 *int64
+	counters []*int64
 }
 
 func (c *CountingReader) Read(p []byte) (n int, err error) {
 	n, err = c.r.Read(p)
 	if n > 0 {
-		delta := int64(n)
-		if c.counter1 != nil {
-			atomic.AddInt64(c.counter1, delta)
-		}
-		if c.counter2 != nil {
-			atomic.AddInt64(c.counter2, delta)
+		for _, counter := range c.counters {
+			atomic.AddInt64(counter, int64(n))
 		}
 	}
 	return
